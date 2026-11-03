@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banner creative test</title>
+<link rel="stylesheet" href="style.css">
+<script async src="https://securepubads.g.doubleclick.net/tag/js/gpt.js"></script>
+<script>
+window.googletag = window.googletag || { cmd: [] };
+googletag.cmd.push(function () {
+  googletag.defineSlot('/6355419/Travel/Europe/France/Paris', [300, 250], 'ad-slot').addService(googletag.pubads());
+  googletag.enableServices();
+  googletag.display('ad-slot');
+});
+</script>
+</head><body>
+<h2>Banner creative test</h2>
+<p><a href="index.html">Back to the index</a></p>
+<div class="bar">Page focus: <b id="focus">?</b> &nbsp;|&nbsp; Visibility: <b id="vis">?</b> &nbsp;|&nbsp; Ad frame: <b id="frame">?</b> &nbsp;|&nbsp; Elapsed: <b id="elapsed">-</b></div>
+<div class="note" id="warn" style="display:none"></div>
+<div class="note">This page serves Google's real test ad so Chrome treats the frame as an ad, then loads your creative into it, the way GAM does.
+The creative burns CPU, Chrome removes it, and the creative's script fires its pixel. Do not click inside the ad. Keep this tab in front.</div>
+
+<fieldset><legend>Creative</legend>
+<label>Creative type:
+<select id="ftype">
+<option value="friendly">Simple banner: same-origin frame (GAM friendly iframe)</option>
+<option value="cross">Cross-origin iframe banner (opaque origin, data: frame)</option>
+<option value="sandbox">SafeFrame-like banner: cross-origin and sandboxed (opaque origin)</option>
+</select></label>
+<p style="margin:6px 0 2px">Your creative HTML (leave empty to use <code>heavy-creative.html</code>, which already contains the sample script and the burn):</p>
+<textarea id="chtml" rows="6" placeholder="Paste any creative HTML here, or choose a file below"></textarea>
+<div style="margin-top:4px"><input type="file" id="cfile"></div>
+<label><input type="checkbox" id="addSample" checked> add the heavy ad sample script to my creative</label>
+&nbsp;<label><input type="checkbox" id="addBurn" checked> add the CPU burn (forces Chrome to remove it)</label>
+<div style="color:#666;font-size:12px">The two boxes only apply when you paste your own creative.</div>
+<div style="margin-top:6px">
+<label>Beacon: <select id="real"><option value="0">Capture only (nothing is sent)</option><option value="1">Send a real beacon to the pixel URL</option></select></label>
+&nbsp;<label>Pixel URL: <input type="text" id="pix" size="58" value="https://example.com/hv?cid=BANNER&amp;bidder=testbidder&amp;size=300x250"></label>
+</div>
+</fieldset>
+
+<button id="start">Start: load the creative into the ad</button><button id="reload">Reload for a fresh ad</button>
+<div style="margin-top:8px"><div id="ad-slot" style="width:300px;height:250px;background:#eee"></div></div>
+<div id="verdict"></div>
+<table><tbody id="log"></tbody></table>
+
+<script src="lib.js"></script>
+<script>
+var $ = HAT.$;
+HAT.init();
+HAT.onStatus = function () {
+  var f = HAT.adFrame();
+  $('frame').textContent = !f ? 'waiting for ad' : (HAT.accessible(f) ? 'ready (same-origin)' : 'present (cross-origin)');
+};
+var qt = new URLSearchParams(location.search).get('type');
+if (qt && ['friendly', 'cross', 'sandbox'].indexOf(qt) > -1) { $('ftype').value = qt; }
+$('cfile').onchange = function () {
+  var f = $('cfile').files[0]; if (!f) { return; }
+  var r = new FileReader(); r.onload = function () { $('chtml').value = r.result; }; r.readAsText(f);
+};
+$('reload').onclick = function () { location.reload(); };
+HAT.onFinish = function () {};
+$('start').onclick = async function () {
+  var f = HAT.adFrame();
+  if (!f || !HAT.accessible(f)) { HAT.add('FAIL', 'The test ad is not ready yet. Wait for it to appear, then click Start.'); return; }
+  var o = { real: $('real').value === '1', pixel: $('pix').value.trim(), addSample: $('addSample').checked, addBurn: $('addBurn').checked };
+  if (!/^https:\/\/[^\s]+$/.test(o.pixel)) { HAT.add('FAIL', 'The pixel URL must start with https://'); return; }
+  if (o.real && !window.confirm('Send ONE real beacon to this URL when the ad is removed?\n\n' + o.pixel)) { return; }
+  var custom = $('chtml').value.trim(), body;
+  if (!custom) {
+    var t = await fetch('heavy-creative.html').then(function (r) { return r.text(); });
+    body = t.replace('"HEAVY_AD_PIXEL"', JSON.stringify(o.pixel));
+    o.addSample = false; o.addBurn = false;
+  } else { body = $('chtml').value; }
+  var ft = $('ftype').value, label = $('ftype').options[$('ftype').selectedIndex].text;
+  $('start').disabled = true;
+  HAT.begin(label, o.real);
+  HAT.add('ACTION', 'Start | ' + label + ' | ' + (custom ? 'your creative' : 'heavy-creative.html') + ' | beacon: ' + (o.real ? 'REAL' : 'capture') + ' | focus: ' + document.hasFocus() + ' | visibility: ' + document.visibilityState);
+  var doc = HAT.buildDoc(body, o), d = f.contentDocument;
+  d.open();
+  if (ft === 'friendly') {
+    d.write(doc);
+  } else {
+    d.write('<body style="margin:0"><iframe src="data:text/html;base64,' + HAT.b64(doc) + '" ' + (ft === 'sandbox' ? 'sandbox="allow-scripts allow-popups allow-forms" ' : '') + 'style="width:100%;height:250px;border:0"></iframe></body>');
+  }
+  d.close();
+  HAT.add('ACTION', 'Creative loaded. It is burning CPU now. Waiting for Chrome to remove the ad (about 15 to 60 s).');
+};
+</script>
+</body></html>

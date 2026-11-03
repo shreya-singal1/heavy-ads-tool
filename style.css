@@ -1,0 +1,21 @@
+body{font-family:system-ui,sans-serif;margin:16px;max-width:980px;color:#1a1a1a}
+h2{margin:0 0 8px}
+a{color:#1a4fa0}
+.bar{background:#eef3fb;border:1px solid #b9c9e6;border-radius:6px;padding:8px 10px;font-size:13px}
+.note{background:#fff7e0;border:1px solid #e6c866;border-radius:6px;padding:8px 10px;font-size:13px;margin:8px 0}
+button{padding:8px 12px;font-size:13px;cursor:pointer;margin:4px 6px 4px 0}
+button[disabled]{opacity:.5;cursor:not-allowed}
+fieldset{border:1px solid #bbb;border-radius:6px;margin:8px 0;padding:8px 10px;font-size:13px}
+textarea{width:100%;box-sizing:border-box;font:12px ui-monospace,Consolas,monospace}
+select,input{font-size:13px}
+#verdict{margin:10px 0;padding:10px 12px;border-radius:6px;font-size:14px;display:none}
+#verdict.pass{display:block;background:#bdf0bd;border:1px solid #6cc06c}
+#verdict.fail{display:block;background:#ffc9c9;border:1px solid #e07070}
+#verdict.info{display:block;background:#fff3cd;border:1px solid #e6c866}
+table{border-collapse:collapse;width:100%;font-size:12px;margin-top:8px}
+td,th{border-bottom:1px solid #ddd;padding:3px 6px;vertical-align:top;word-break:break-all;text-align:left}
+table.t td,table.t th{padding:8px 10px;font-size:14px;word-break:normal}
+table.t th{background:#eef3fb}
+a.go{display:inline-block;background:#1a4fa0;color:#fff;padding:5px 10px;border-radius:5px;text-decoration:none;font-size:13px;white-space:nowrap}
+tr.BEACON td{background:#e3f6e3;font-weight:600}tr.ACTION td{background:#e6eefc;font-weight:600}tr.diag td{color:#555}
+tr.PASS td{background:#bdf0bd;font-weight:600}tr.FAIL td{background:#ffc9c9;font-weight:600}tr.INFO td{background:#fff3cd;font-weight:600}tr.ad td{background:#f3eaff}

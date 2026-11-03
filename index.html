@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Heavy ads tool</title>
+<link rel="stylesheet" href="style.css">
+</head><body>
+<h2>Heavy ads tool</h2>
+<p>Checks the heavy ad detection script: the script that reports when Chrome removes an ad for using too many resources
+(more than 4 MB of network, or 15 s of CPU in any 30 s window, or 60 s of CPU in total).
+Pick the kind of creative you want to test. <b>Desktop Chrome only.</b> Keep the tab in front and do not click inside the ad.</p>
+
+<table class="t"><thead><tr><th>Creative type</th><th>What it is</th><th>Open</th></tr></thead><tbody>
+<tr><td><b>Simple banner</b></td><td>HTML creative in a same-origin frame, like a GAM friendly iframe. The creative runs inside the ad frame itself.</td><td><a class="go" href="banner.html?type=friendly">Test</a></td></tr>
+<tr><td><b>Cross-origin iframe banner</b></td><td>The creative sits in an iframe with its own opaque origin (a <code>data:</code> frame) nested inside the ad frame.</td><td><a class="go" href="banner.html?type=cross">Test</a></td></tr>
+<tr><td><b>SafeFrame-like banner</b></td><td>Cross-origin and sandboxed (opaque origin, storage blocked), the strictest frame a creative can get. A stand-in for a Google SafeFrame.</td><td><a class="go" href="banner.html?type=sandbox">Test</a></td></tr>
+<tr><td><b>VPAID video (IBV)</b></td><td>A heavy VPAID VAST creative played by Google's IMA SDK. IMA runs the VPAID code in its own cross-origin iframe.</td><td><a class="go" href="vpaid.html">Test</a></td></tr>
+<tr><td><b>Your GAM creative</b></td><td>A creative served by your own Google Ad Manager ad unit. Open <code>gam.html?unit=/NETWORK/AD_UNIT&amp;size=300x250</code>.</td><td><a class="go" href="gam.html">Test</a></td></tr>
+<tr><td><b>Any live page</b></td><td>A DevTools panel that picks a same-origin ad frame on any site. Shown here on Google's test ad. How to install it is on the install page.</td><td><a class="go" href="panel.html">Panel demo</a> <a class="go" href="install.html">Install</a></td></tr>
+</tbody></table>
+
+<p>The banner pages also take <b>any creative HTML</b> that you paste or load from a file, with or without the sample script and the CPU burn.
+Beacons are <b>captured</b> by default (nothing is sent). Choose <b>Send a real beacon</b> to send one to a URL you set, and watch it in DevTools &gt; Network.</p>
+<p><a href="https://github.com/shreya-singal1/heavy-ads-tool">Source and README on GitHub</a></p>
+</body></html>

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VPAID heavy creative test</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://imasdk.googleapis.com/js/sdkloader/ima3.js"></script>
+</head><body>
+<h2>VPAID heavy creative test (IMA SDK)</h2>
+<p><a href="index.html">Back to the index</a></p>
+<div class="bar">Page focus: <b id="focus">?</b> &nbsp;|&nbsp; Visibility: <b id="vis">?</b> &nbsp;|&nbsp; IMA SDK: <b id="sdk">?</b> &nbsp;|&nbsp; Elapsed: <b id="elapsed">-</b></div>
+<div class="note" id="warn" style="display:none"></div>
+<div class="note">This page plays a heavy VPAID VAST creative with Google's IMA SDK. IMA runs a VPAID ad in its own iframe, which Chrome should treat as an ad.
+The creative floods the network (it fetches a 6 MB sample video repeatedly) until Chrome removes the ad. With the first box ticked, the heavy ad sample script
+is added at the top of the VPAID code and its events are posted back to this page. Do not click the ad. Keep this tab in front.</div>
+<fieldset><legend>Options</legend>
+<label><input type="checkbox" id="detect" checked> add the heavy ad sample script (and a reporter) to the VPAID code</label><br>
+<label>Beacon: <select id="real"><option value="0">Capture only (nothing is sent)</option><option value="1">Send a real beacon to the pixel URL</option></select></label>
+&nbsp;<label>Pixel URL: <input type="text" id="pix" size="60" value="https://example.com/hv?cid=VPAID&amp;bidder=testbidder&amp;size=640x360"></label><br>
+<label>Files fetched (6 MB each): <input type="number" id="flood" value="10" min="0" max="100" style="width:60px"></label>
+</fieldset>
+<button id="start">Start: play the VPAID creative</button><button id="reload">Reload</button>
+<button id="showvast">Show the VAST XML</button>
+<div style="position:relative;width:640px;height:360px;background:#000;margin-top:8px"><video id="vid" width="640" height="360" muted playsinline></video><div id="adc" style="position:absolute;left:0;top:0;width:640px;height:360px"></div></div>
+<details style="margin-top:8px"><summary>VAST XML (copy it into your ad server or player)</summary><textarea id="vastbox" rows="10" readonly></textarea></details>
+<div id="verdict"></div>
+<table><tbody id="log"></tbody></table>
+
+<script src="lib.js"></script>
+<script>
+var $ = HAT.$;
+HAT.init();
+HAT.onStatus = function () { $('sdk').textContent = (window.google && google.ima) ? 'loaded' : 'NOT loaded (offline or blocked)'; };
+
+function opts() {
+  var pixel = $('pix').value.trim();
+  return {
+    detect: $('detect').checked, real: $('real').value === '1',
+    flood: Math.max(0, Math.min(100, parseInt($('flood').value, 10) || 0)), burnMs: 5000,
+    pixel: /^https:\/\/[^"\s<>\\]+$/.test(pixel) ? pixel : 'https://example.com/hv?cid=VPAID&bidder=testbidder&size=640x360'
+  };
+}
+
+// The heavy VPAID creative: a short CPU burn plus repeated fetches of a 6 MB sample video (to pass the 4 MB network limit).
+function vpaidSource(o) {
+  return (o.detect ? HAT.reporter(o.real) + '\n' + HAT.SAMPLE(o.pixel) + '\n' : '') + `
+(function() {
+  var HeavyAdVpaid = function() {
+    this.eventsCallbacks = {};
+  };
+  HeavyAdVpaid.prototype.initAd = function(w, h, vm, b, cd, ev) {
+    this.callEvent('AdLoaded');
+  };
+  HeavyAdVpaid.prototype.startAd = function() {
+    this.callEvent('AdStarted');
+    this.callEvent('AdImpression');
+    console.log("[VPAID] Starting heavy load...");
+
+    // Burn CPU for 5 seconds (enough for longtask, but won't starve observer)
+    const start = performance.now();
+    const duration = ${o.burnMs};
+    function burn() {
+      const now = performance.now();
+      while (performance.now() - now < 100) {
+        for (let i = 0; i < 1000000; i++) Math.sqrt(i);
+      }
+      if (performance.now() - start < duration) {
+        setTimeout(burn, 10);
+      } else {
+        console.log("[VPAID] CPU burn complete.");
+      }
+    }
+    burn();
+
+    // NETWORK FLOODING (to trigger the > 4MB network limit)
+    for (let i = 0; i < ${o.flood}; i++) {
+        fetch('https://storage.googleapis.com/gvabox/media/samples/android.mp4?cache=' + Math.random() + i)
+            .then(r => r.blob())
+            .then(b => console.log("[VPAID] Downloaded: " + b.size))
+            .catch(e => console.log("[VPAID] Fetch error (expected if intervened): " + e.message));
+    }
+  };
+  HeavyAdVpaid.prototype.stopAd = function() { this.callEvent('AdStopped'); };
+  HeavyAdVpaid.prototype.subscribe = function(cb, e) { this.eventsCallbacks[e] = cb; };
+  HeavyAdVpaid.prototype.unsubscribe = function(e) { delete this.eventsCallbacks[e]; };
+  HeavyAdVpaid.prototype.callEvent = function(e) { if (this.eventsCallbacks[e]) this.eventsCallbacks[e](); };
+  HeavyAdVpaid.prototype.getAdLinear = function() { return true; };
+  HeavyAdVpaid.prototype.getAdRemainingTime = function() { return 30; };
+  HeavyAdVpaid.prototype.getAdDuration = function() { return 30; };
+  HeavyAdVpaid.prototype.handshakeVersion = function(v) { return '2.0'; };
+  HeavyAdVpaid.prototype.resizeAd = function(w, h, vm) {};
+  HeavyAdVpaid.prototype.pauseAd = function() {};
+  HeavyAdVpaid.prototype.resumeAd = function() {};
+  HeavyAdVpaid.prototype.expandAd = function() {};
+  HeavyAdVpaid.prototype.collapseAd = function() {};
+  HeavyAdVpaid.prototype.skipAd = function() {};
+  HeavyAdVpaid.prototype.getAdWidth = function() { return 640; };
+  HeavyAdVpaid.prototype.getAdHeight = function() { return 360; };
+  HeavyAdVpaid.prototype.getAdIcons = function() { return false; };
+  HeavyAdVpaid.prototype.getAdSkippableState = function() { return false; };
+  HeavyAdVpaid.prototype.getAdExpanded = function() { return false; };
+  HeavyAdVpaid.prototype.getAdVolume = function() { return 1.0; };
+  HeavyAdVpaid.prototype.setAdVolume = function(v) {};
+  window.getVPAIDAd = function() { return new HeavyAdVpaid(); };
+})();
+`;
+}
+
+function vastXml(o) {
+  var media = 'data:application/javascript;base64,' + HAT.b64(vpaidSource(o));
+  return `<VAST version="3.0">
+              <Ad id="heavy-ad-unit">
+                <InLine>
+                  <AdSystem>Test System</AdSystem>
+                  <AdTitle>Reliable Heavy Ad</AdTitle>
+                  <Impression><![CDATA[https://example.com/impression]]></Impression>
+                  <Creatives>
+                    <Creative id="creative-1">
+                      <Linear>
+                        <Duration>00:00:30</Duration>
+                        <MediaFiles>
+                          <MediaFile delivery="progressive" type="application/javascript" apiFramework="VPAID" width="640" height="360">
+                            <![CDATA[${media}]]>
+                          </MediaFile>
+                        </MediaFiles>
+                      </Linear>
+                    </Creative>
+                  </Creatives>
+                </InLine>
+              </Ad>
+            </VAST>`;
+}
+
+$('reload').onclick = function () { location.reload(); };
+$('showvast').onclick = function () { $('vastbox').value = vastXml(opts()); $('vastbox').parentNode.open = true; };
+HAT.onFinish = function () {};
+$('start').onclick = function () {
+  if (!(window.google && google.ima)) { HAT.add('FAIL', 'The IMA SDK did not load (offline, or blocked by an extension).'); return; }
+  var o = opts();
+  if (o.real && !window.confirm('Send ONE real beacon to this URL when the ad is removed?\n\n' + o.pixel)) { return; }
+  $('start').disabled = true;
+  HAT.begin('VPAID video (IMA SDK)', o.real);
+  HAT.add('ACTION', 'Start | sample script: ' + o.detect + ' | beacon: ' + (o.real ? 'REAL' : 'capture') + ' | files: ' + o.flood + ' | focus: ' + document.hasFocus() + ' | visibility: ' + document.visibilityState);
+  var vast = vastXml(o);
+  try {
+    google.ima.settings.setVpaidMode(google.ima.ImaSdkSettings.VpaidMode.ENABLED);
+    var dc = new google.ima.AdDisplayContainer($('adc'), $('vid')); dc.initialize();
+    var loader = new google.ima.AdsLoader(dc);
+    loader.addEventListener(google.ima.AdErrorEvent.Type.AD_ERROR, function (e) { var er = e.getError(); HAT.add('FAIL', 'IMA ad error: ' + er.getErrorCode() + ' ' + er.getMessage()); }, false);
+    loader.addEventListener(google.ima.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, function (e) {
+      var am = e.getAdsManager($('vid'));
+      am.addEventListener(google.ima.AdErrorEvent.Type.AD_ERROR, function (ev) { var er = ev.getError(); HAT.add('FAIL', 'IMA ad error: ' + er.getErrorCode() + ' ' + er.getMessage()); });
+      ['LOADED', 'STARTED', 'IMPRESSION', 'COMPLETE', 'ALL_ADS_COMPLETED'].forEach(function (n) { am.addEventListener(google.ima.AdEvent.Type[n], function () { HAT.add('ad', 'IMA event: ' + n); }); });
+      HAT.add('ACTION', 'IMA loaded the VAST. Initialising and starting the ad (the VPAID code runs in its own iframe).');
+      am.init(640, 360, google.ima.ViewMode.NORMAL); am.start();
+    }, false);
+    var req = new google.ima.AdsRequest(); req.adsResponse = vast;
+    req.linearAdSlotWidth = 640; req.linearAdSlotHeight = 360; req.nonLinearAdSlotWidth = 640; req.nonLinearAdSlotHeight = 150;
+    loader.requestAds(req);
+  } catch (err) { HAT.add('FAIL', 'Could not start IMA: ' + err.message); }
+};
+</script>
+</body></html>

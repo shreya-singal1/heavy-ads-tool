@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GAM creative test</title>
+<link rel="stylesheet" href="style.css">
+<script async src="https://securepubads.g.doubleclick.net/tag/js/gpt.js"></script>
+<script>
+window.googletag = window.googletag || { cmd: [] };
+var q = new URLSearchParams(location.search);
+var unit = q.get('unit') || '';
+var sz = (q.get('size') || '300x250').split('x').map(Number);
+var UNIT_OK = /^\/\d+\/[\w\-\/.]+$/.test(unit);
+googletag.cmd.push(function () {
+  if (!UNIT_OK) { return; }
+  googletag.defineSlot(unit, [sz], 'gam-slot').addService(googletag.pubads());
+  googletag.pubads().addEventListener('slotRenderEnded', function (e) {
+    window.__renderEnded = { empty: e.isEmpty, size: e.size, t: Date.now() };
+  });
+  googletag.enableServices();
+  googletag.display('gam-slot');
+});
+</script>
+</head><body>
+<h2>Your GAM creative test</h2>
+<p><a href="index.html">Back to the index</a></p>
+<div class="bar">Page focus: <b id="focus">?</b> &nbsp;|&nbsp; Visibility: <b id="vis">?</b> &nbsp;|&nbsp; Ad frame: <b id="frame">?</b> &nbsp;|&nbsp; Since render: <b id="elapsed">-</b></div>
+<div class="note" id="warn" style="display:none"></div>
+<div class="note">Ad unit: <b id="unitshow"></b>. Put <code>heavy-creative.html</code> in a Google Ad Manager Custom HTML creative (with your real pixel in place of
+<code>HEAVY_AD_PIXEL</code>) on a line item that serves to this ad unit, then load this page as
+<code>gam.html?unit=/NETWORK_CODE/AD_UNIT_PATH&amp;size=300x250</code>. The creative burns CPU on its own and Chrome should remove it after about 15 to 60 s.
+Do not click the ad. Keep this tab in front. To see your pixel open DevTools &gt; Network, tick Preserve log and filter on your pixel host.
+A <b>ping</b> row with an <code>rd</code> parameter is the proof.</div>
+<button id="reload">Reload page for a fresh ad</button>
+<div style="margin-top:8px"><div id="gam-slot" style="min-width:300px;min-height:50px;background:#eee"></div></div>
+<div id="verdict"></div>
+<table><tbody id="log"></tbody></table>
+
+<script src="lib.js"></script>
+<script>
+var $ = HAT.$;
+HAT.init();
+var startedAt = 0, finished = false, slotFrame = null, renderSeen = false;
+HAT.onStatus = function () {
+  var f = HAT.adFrame();
+  $('frame').textContent = !f ? 'waiting for ad' : (HAT.accessible(f) ? 'present (same-origin)' : 'present (cross-origin)');
+  if (f && !slotFrame) { slotFrame = f; }
+  if (startedAt && !finished) { $('elapsed').textContent = Math.round((Date.now() - startedAt) / 1000) + ' s'; }
+  if (window.__renderEnded && !renderSeen) {
+    renderSeen = true; startedAt = window.__renderEnded.t;
+    HAT.add('ad', 'slot rendered: ' + (window.__renderEnded.empty ? 'EMPTY (no ad served, check the line item targeting)' : 'ad served, size ' + (window.__renderEnded.size || []).join('x')), startedAt);
+  }
+  if (startedAt && !finished && slotFrame && !slotFrame.isConnected) {
+    finished = true; $('elapsed').textContent = 'done';
+    HAT.verdict('info', 'The ad frame left the page about ' + Math.round((Date.now() - startedAt) / 1000) + ' s after render. Check your Network tab for the ping to your pixel. If the ad was replaced by a refresh rather than removed by Chrome, retry.');
+  }
+};
+$('unitshow').textContent = unit || '(none: add ?unit=/NETWORK_CODE/AD_UNIT_PATH&size=300x250 to the URL)';
+if (!UNIT_OK) { HAT.verdict('fail', 'Missing or invalid ad unit. Open this page as gam.html?unit=/NETWORK_CODE/AD_UNIT_PATH&size=300x250'); }
+$('reload').onclick = function () { location.reload(); };
+</script>
+</body></html>
