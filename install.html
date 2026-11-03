@@ -1,0 +1,424 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Heavy ad test tool: install</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:860px;margin:24px auto;padding:0 16px;color:#1a1a1a;line-height:1.45}
+h1{font-size:22px}h2{font-size:17px;margin-top:26px}
+.box{background:#f4f6fa;border:1px solid #cfd6e4;border-radius:8px;padding:12px 14px}
+a.bm{display:inline-block;background:#1a4fa0;color:#fff;padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:600}
+textarea{width:100%;height:200px;font:11px ui-monospace,Consolas,monospace}
+button{padding:6px 12px;font-size:13px;cursor:pointer}
+code{background:#eef1f6;padding:1px 4px;border-radius:3px}
+</style></head><body>
+<h1>Heavy ad test tool</h1>
+<p>Runs a panel inside any page. It finds ad iframes, installs the heavy ad sample script into the one you pick, makes that frame burn CPU until Chrome removes it, and reports what the script did.</p>
+
+<h2>Option 1 (most reliable): paste into DevTools</h2>
+<div class="box">
+<ol>
+<li>Open the page you want to test in desktop Chrome and wait for ads to load. Turn device emulation off.</li>
+<li>Press F12, open the <b>Console</b>.</li>
+<li>Click the button below, then paste into the Console and press Enter.</li>
+</ol>
+<button id="copy">Copy tool code</button> <span id="msg"></span>
+<textarea id="code" readonly>/*
+ * Heavy Ad Test Tool
+ *
+ * A panel you run inside any page (DevTools console, DevTools Snippet or bookmarklet).
+ * It finds ad iframes, installs the HEAVY_AD sample script into the one you pick, makes that frame
+ * burn CPU until Chrome removes it, and reports what the script did.
+ *
+ * Limits: Chrome only (other browsers have no heavy ad intervention). The frame must be reachable
+ * from this page (same origin, e.g. GPT friendly iframes). Cross-origin frames are listed but cannot be used.
+ * Do not click inside the ad (a click exempts it from the intervention). Keep the tab in front.
+ */
+(function () {
+  'use strict';
+  if (window.__heavyAdTester &amp;&amp; window.__heavyAdTester.destroy) {
+    try { window.__heavyAdTester.destroy(); } catch (e) {}
+  }
+
+  var DEFAULT_PIXEL = 'https://example.com/hv?cid=TEST123&amp;bidder=testbidder&amp;size=300x250';
+  var TIMEOUT_MS = 150000;
+  var S = {
+    frame: null, win: null, startedAt: 0, running: false, finished: false,
+    events: [], beacons: [], navigated: false, gotCb: false, gotHide: false,
+    hideAt: 0, lastBeaconAt: 0, opts: null, verdictKind: '', verdictText: ''
+  };
+  var candidates = [];
+  var tickTimer = null;
+
+  // ---------------------------------------------------------------- panel
+  var host = document.createElement('div');
+  host.style.cssText = 'all:initial;position:fixed;right:12px;bottom:12px;z-index:2147483647;';
+  var root = host.attachShadow({ mode: 'open' });
+  root.innerHTML = [
+    '&lt;style&gt;',
+    '.p{font:12px/1.35 system-ui,sans-serif;color:#1a1a1a;background:#fff;border:1px solid #777;border-radius:8px;',
+    'box-shadow:0 4px 18px rgba(0,0,0,.35);width:390px;max-height:84vh;overflow:auto;padding:8px 10px}',
+    '.h{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:13px}',
+    '.s{background:#eef3fb;border:1px solid #b9c9e6;border-radius:5px;padding:4px 6px;margin-bottom:4px}',
+    '.w{background:#fff3cd;border:1px solid #e6c866;border-radius:5px;padding:4px 6px;margin-bottom:4px;display:none}',
+    '.l{margin:6px 0 2px;font-weight:600}',
+    '.fr{border:1px solid #ccc;border-radius:5px;max-height:120px;overflow:auto;padding:2px 4px}',
+    '.fr label{display:block;padding:1px 0;word-break:break-all}',
+    '.fr .no{color:#999}',
+    'label.f{display:block;margin-top:4px}',
+    'input[type=text],select{width:100%;box-sizing:border-box;font:11px system-ui;padding:2px}',
+    '.b{display:flex;gap:6px;margin-top:6px}',
+    'button{font:12px system-ui;padding:4px 8px;cursor:pointer}',
+    'button[disabled]{opacity:.5;cursor:not-allowed}',
+    '#verdict{margin-top:6px;padding:6px;border-radius:5px;display:none}',
+    '#verdict.pass{display:block;background:#bdf0bd;border:1px solid #6cc06c}',
+    '#verdict.fail{display:block;background:#ffc9c9;border:1px solid #e07070}',
+    '#verdict.info{display:block;background:#fff3cd;border:1px solid #e6c866}',
+    '#log{margin-top:6px;font:11px/1.3 ui-monospace,Consolas,monospace;max-height:170px;overflow:auto;border-top:1px solid #ddd;padding-top:4px}',
+    '#log div{word-break:break-all}',
+    '#log .BEACON{color:#0a7a0a;font-weight:700}#log .diag{color:#555}#log .PASS{color:#0a7a0a;font-weight:700}',
+    '#log .FAIL{color:#b00020;font-weight:700}#log .INFO{color:#8a6d00;font-weight:700}#log .ACTION{color:#1a4fa0;font-weight:700}',
+    '&lt;/style&gt;',
+    '&lt;div class="p"&gt;',
+    '&lt;div class="h"&gt;&lt;b&gt;Heavy ad test tool&lt;/b&gt;&lt;button id="x" title="Close"&gt;x&lt;/button&gt;&lt;/div&gt;',
+    '&lt;div class="s"&gt;Focus: &lt;b id="f"&gt;?&lt;/b&gt; | Visible: &lt;b id="v"&gt;?&lt;/b&gt; | Time: &lt;b id="t"&gt;-&lt;/b&gt;&lt;/div&gt;',
+    '&lt;div class="w" id="warn"&gt;&lt;/div&gt;',
+    '&lt;div class="l"&gt;Ad frames (select one)&lt;/div&gt;',
+    '&lt;div class="fr" id="frames"&gt;&lt;/div&gt;',
+    '&lt;div class="b"&gt;&lt;button id="rescan"&gt;Rescan&lt;/button&gt;&lt;/div&gt;',
+    '&lt;label class="f"&gt;Pixel URL&lt;input type="text" id="pix"&gt;&lt;/label&gt;',
+    '&lt;label class="f"&gt;Beacon&lt;select id="bm"&gt;&lt;option value="capture"&gt;Capture only (nothing is sent)&lt;/option&gt;',
+    '&lt;option value="real"&gt;Send a real beacon&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;',
+    '&lt;label class="f"&gt;Burn&lt;select id="burn"&gt;&lt;option value="cpu"&gt;CPU burn (about 94% busy)&lt;/option&gt;',
+    '&lt;option value="block"&gt;Block the thread for 40 s (page freezes)&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;',
+    '&lt;label class="f"&gt;My creative HTML (optional, replaces the frame content)&lt;textarea id="chtml" rows="3" style="width:100%;box-sizing:border-box;font:11px ui-monospace,Consolas,monospace"&gt;&lt;/textarea&gt;&lt;/label&gt;',
+    '&lt;label class="f"&gt;&lt;input type="checkbox" id="addsample" checked&gt; add the sample script to my creative &amp;nbsp;&lt;input type="checkbox" id="addburn" checked&gt; add the burn&lt;/label&gt;',
+    '&lt;label class="f"&gt;&lt;input type="checkbox" id="norefresh" checked&gt; Disable googletag refresh() during the test&lt;/label&gt;',
+    '&lt;div class="b"&gt;&lt;button id="start"&gt;Start test&lt;/button&gt;&lt;button id="stop"&gt;Stop&lt;/button&gt;&lt;button id="copy"&gt;Copy report&lt;/button&gt;&lt;/div&gt;',
+    '&lt;div id="verdict"&gt;&lt;/div&gt;',
+    '&lt;div id="log"&gt;&lt;/div&gt;',
+    '&lt;/div&gt;'
+  ].join('');
+  document.documentElement.appendChild(host);
+  var $ = function (id) { return root.getElementById(id); };
+  $('pix').value = DEFAULT_PIXEL;
+
+  // ---------------------------------------------------------------- helpers
+  function now() { return Date.now(); }
+  function rel(t) { return ((t - (S.startedAt || t)) / 1000).toFixed(2) + 's'; }
+  function short(u) { u = String(u); return u.length &gt; 90 ? u.slice(0, 90) + '...' : u; }
+
+  function log(kind, msg) {
+    var e = { t: now(), kind: kind, msg: String(msg) };
+    S.events.push(e);
+    if (kind === 'diag') {
+      if (/^observer callback got HeavyAdIntervention/.test(e.msg)) { S.gotCb = true; }
+      if (/^pagehide fired/.test(e.msg)) { S.gotHide = true; S.hideAt = e.t; }
+    }
+    var d = document.createElement('div');
+    d.className = kind;
+    d.textContent = (S.startedAt ? '+' + rel(e.t) : '--') + '  ' + kind + '  ' + e.msg;
+    var box = $('log');
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function setVerdict(kind, text) {
+    S.verdictKind = kind;
+    S.verdictText = text;
+    var v = $('verdict');
+    v.className = kind;
+    v.textContent = text;
+  }
+
+  // ---------------------------------------------------------------- frame discovery
+  function collect(doc, depth, out) {
+    var list = doc.querySelectorAll('iframe');
+    for (var i = 0; i &lt; list.length; i++) {
+      var f = list[i];
+      var r = f.getBoundingClientRect();
+      var d = null;
+      try { d = f.contentDocument; } catch (e) { d = null; }
+      var entry = {
+        el: f, acc: !!d, id: f.id || f.name || '(no id)', w: Math.round(r.width), h: Math.round(r.height),
+        bodyLen: d &amp;&amp; d.body ? d.body.innerHTML.length : 0, nested: d ? d.querySelectorAll('iframe').length : 0, depth: depth
+      };
+      if (entry.w &gt;= 50 &amp;&amp; entry.h &gt;= 40) { out.push(entry); }
+      if (d &amp;&amp; depth &lt; 2) { collect(d, depth + 1, out); }
+    }
+  }
+
+  var lastScan = 0;
+  function rescan() {
+    lastScan = now();
+    candidates = [];
+    collect(document, 0, candidates);
+    candidates.sort(function (a, b) {
+      var sa = (a.acc ? 2 : 0) + (/google_ads|dfp|gpt|banner|ad/i.test(a.id) ? 1 : 0);
+      var sb = (b.acc ? 2 : 0) + (/google_ads|dfp|gpt|banner|ad/i.test(b.id) ? 1 : 0);
+      return sb - sa;
+    });
+    var box = $('frames');
+    box.textContent = '';
+    if (!candidates.length) {
+      box.textContent = 'No iframes of a usable size found. Scroll so ads load, then Rescan.';
+      S.frame = null;
+      return;
+    }
+    var chosen = false;
+    candidates.forEach(function (c, i) {
+      var lab = document.createElement('label');
+      var rb = document.createElement('input');
+      rb.type = 'radio';
+      rb.name = 'fr';
+      rb.disabled = !c.acc;
+      rb.onchange = function () { S.frame = c.el; };
+      if (!chosen &amp;&amp; c.acc &amp;&amp; c.bodyLen &gt; 1000) { rb.checked = true; S.frame = c.el; chosen = true; }
+      lab.appendChild(rb);
+      lab.appendChild(document.createTextNode(' ' + c.id + ' (' + c.w + 'x' + c.h + ', ' + (c.acc ? Math.round(c.bodyLen / 1000) + ' KB, ' + c.nested + ' nested' : 'not reachable, cross-origin') + ')'));
+      if (!c.acc) { lab.className = 'no'; }
+      box.appendChild(lab);
+    });
+    if (!chosen) { S.frame = null; }
+  }
+
+  // ---------------------------------------------------------------- code injected into the ad frame
+  function buildFrameCode(o) {
+    var burn = o.burn === 'block'
+      ? 'setTimeout(function(){var s=Date.now();while(Date.now()-s&lt;40000){Math.sqrt(Math.random());}},0);'
+      : 'window.__stopBurn=false;(function burn(){if(window.__stopBurn){return;}var s=performance.now();while(performance.now()-s&lt;80){Math.sqrt(Math.random());}setTimeout(burn,5);})();';
+    var sample = [
+      '(function () {',
+      'var PIXEL = ' + JSON.stringify(o.pixel) + ';',
+      'function send(reports) {',
+      '    for (var i = 0; i &lt; reports.length; i++) {',
+      '        try {',
+      '            var body = reports[i].body;',
+      '            if (!body || body.id !== "HeavyAdIntervention") {',
+      '                continue;',
+      '            }',
+      '            var sep = "&amp;";',
+      '            navigator.sendBeacon(PIXEL + sep + "rd=" + encodeURIComponent(JSON.stringify({',
+      '                message: body.message,',
+      '                sourceFile: body.sourceFile,',
+      '                lineNumber: body.lineNumber,',
+      '                columnNumber: body.columnNumber',
+      '            })));',
+      '        } catch (e) {',
+      '        }',
+      '    }',
+      '}',
+      'try {',
+      '    var observer = new ReportingObserver(send, {',
+      '        types: ["intervention"],',
+      '        buffered: true',
+      '    });',
+      '    observer.observe();',
+      '    window.addEventListener("pagehide", function () {',
+      '        send(observer.takeRecords());',
+      '    });',
+      '} catch (e) {',
+      '}',
+      '})();'
+    ].join('\n');
+    return [
+      '(function () {',
+      'var L = window.__hatLog, B = window.__hatBeacon, real = ' + (o.real ? 'true' : 'false') + ';',
+      'var origSB = navigator.sendBeacon.bind(navigator);',
+      'navigator.sendBeacon = function (u, d) {',
+      '  var ok = true;',
+      '  if (real) { ok = false; try { ok = origSB(u, d); } catch (e) { try { L("diag", "sendBeacon threw " + e.name); } catch (x) {} } }',
+      '  try { B(String(u), ok); } catch (e) {}',
+      '  return ok;',
+      '};',
+      'document.addEventListener("securitypolicyviolation", function (e) { try { L("diag", "CSP violation: " + e.violatedDirective); } catch (x) {} });',
+      'try { new ReportingObserver(function (r) { r.forEach(function (x) { try { L("diag", "observer callback got " + (x.body &amp;&amp; x.body.id)); } catch (e) {} }); }, { types: ["intervention"], buffered: true }).observe(); } catch (e) {}',
+      'window.addEventListener("pagehide", function () { try { L("diag", "pagehide fired in ad frame"); } catch (x) {} });',
+      '// ---- sample script under test ----',
+      o.addSample === false ? '' : sample,
+      '// ---- load generator ----',
+      o.addBurn === false ? '' : burn,
+      'try { L("diag", "installed in the ad frame, load started"); } catch (e) {}',
+      '})();'
+    ].join('\n');
+  }
+
+  // ---------------------------------------------------------------- run
+  function stopBurn() { try { if (S.win) { S.win.__stopBurn = true; } } catch (e) {} }
+
+  function finish(kind, text) {
+    if (S.finished) { return; }
+    S.finished = true;
+    S.running = false;
+    stopBurn();
+    setVerdict(kind, text);
+    log(kind.toUpperCase(), text);
+    $('start').disabled = false;
+    $('t').textContent = 'done';
+  }
+
+  function start() {
+    if (S.running) { return; }
+    var fr = S.frame;
+    if (!fr || !fr.isConnected) { setVerdict('fail', 'Select a reachable ad frame first (Rescan if the list is empty).'); return; }
+    var w, d;
+    try { w = fr.contentWindow; d = fr.contentDocument; if (!d || !d.body) { throw new Error('no document'); } }
+    catch (e) { setVerdict('fail', 'That frame is not reachable from this page (cross-origin).'); return; }
+    var custom = $('chtml').value;
+    var o = {
+      pixel: $('pix').value.trim() || DEFAULT_PIXEL, real: $('bm').value === 'real', burn: $('burn').value,
+      custom: custom, addSample: custom.trim() ? $('addsample').checked : true, addBurn: custom.trim() ? $('addburn').checked : true
+    };
+    if (o.real &amp;&amp; !window.confirm('Send ONE real beacon to this URL when the ad is removed?\n\n' + o.pixel)) { return; }
+
+    S.events = []; S.beacons = []; S.navigated = false; S.gotCb = false; S.gotHide = false;
+    S.hideAt = 0; S.lastBeaconAt = 0; S.finished = false; S.win = w; S.opts = o;
+    $('log').textContent = '';
+    setVerdict('', '');
+    $('verdict').className = '';
+    S.startedAt = now();
+    S.running = true;
+    $('start').disabled = true;
+
+    if ($('norefresh').checked) {
+      try { window.googletag.pubads().refresh = function () { return; }; log('ACTION', 'googletag refresh() disabled for this page view (reload the page to undo)'); } catch (e) {}
+    }
+    var hatLog = function (k, m) { log(k, m); };
+    var hatBeacon = function (u, ok) {
+      S.beacons.push({ t: now(), url: u, queued: ok });
+      S.lastBeaconAt = now();
+      log('BEACON', 'sendBeacon called' + (o.real ? '' : ' (captured, not sent)') + ', queued=' + ok + ' url=' + short(u));
+    };
+    w.__hatLog = hatLog;
+    w.__hatBeacon = hatBeacon;
+    fr.addEventListener('load', function () {
+      if (now() - S.startedAt &lt; 1500) { return; } // our own write also fires load
+      S.navigated = true;
+      log('diag', 'ad iframe element fired load (frame navigated)');
+    });
+
+    log('ACTION', 'Start | focus: ' + document.hasFocus() + ' | visibility: ' + document.visibilityState + ' | beacon: ' + (o.real ? 'REAL' : 'capture only') + ' | burn: ' + o.burn);
+    try {
+      if (o.custom.trim()) {
+        d.open();
+        var w2 = fr.contentWindow;
+        w2.__hatLog = hatLog;
+        w2.__hatBeacon = hatBeacon;
+        S.win = w2;
+        d.write(o.custom + '&lt;script&gt;' + buildFrameCode(o) + '&lt;\/script&gt;');
+        d.close();
+        log('ACTION', 'Replaced the frame content with your creative' + (o.addSample ? ', sample script added' : '') + (o.addBurn ? ', burn added' : ''));
+      } else {
+        var s = d.createElement('script');
+        s.textContent = buildFrameCode(o);
+        d.body.appendChild(s);
+      }
+    } catch (e) {
+      finish('fail', 'Could not install into the frame: ' + e.message);
+    }
+  }
+
+  function stop() {
+    if (S.running) { finish('info', 'Stopped by you. The burn loop was told to stop.'); } else { stopBurn(); }
+  }
+
+  function pathText() { return S.gotCb ? 'the observer callback ran' : 'only pagehide ran: the report was drained by takeRecords() (callback never ran)'; }
+
+  function tick() {
+    $('f').textContent = document.hasFocus() ? 'YES' : 'NO (click the page background, not the ad)';
+    $('v').textContent = document.visibilityState;
+    var warn = [];
+    if (/Android|Mobile|iPhone/.test(navigator.userAgent)) { warn.push('Mobile user agent: device emulation looks ON. Ad slots differ from desktop; turn it off.'); }
+    if (!/Chrome\//.test(navigator.userAgent)) { warn.push('Not Chrome: the heavy ad intervention only exists in Chrome.'); }
+    $('warn').style.display = warn.length ? 'block' : 'none';
+    $('warn').textContent = warn.join(' ');
+    if (!S.running &amp;&amp; (!S.frame || !S.frame.isConnected) &amp;&amp; now() - lastScan &gt; 2000) { rescan(); }
+    if (!S.running || S.finished) { return; }
+    var t = now(), age = t - S.startedAt;
+    $('t').textContent = Math.round(age / 1000) + ' s';
+    if (S.beacons.length &gt; 0 &amp;&amp; t - S.lastBeaconAt &gt; 1500) {
+      var n = S.beacons.length;
+      finish(n === 1 ? 'pass' : 'fail',
+        (n === 1 ? 'PASS: exactly one beacon. ' : 'FAIL: ' + n + ' beacons, expected one. ') +
+        'Path: ' + pathText() + '. Removed after ' + rel(S.beacons[0].t) + '. Mode: ' +
+        (S.opts.real ? 'REAL send (check your Network tab for the ping)' : 'capture only, nothing was sent') + '.');
+      return;
+    }
+    if (S.gotHide &amp;&amp; S.beacons.length === 0 &amp;&amp; t - S.hideAt &gt; 1800) {
+      if (S.frame &amp;&amp; !S.frame.isConnected) {
+        finish('info', 'The page itself removed or replaced the frame (for example an ad refresh), not Chrome. No beacon was sent, which is correct. Rescan, pick a frame and retry.');
+      } else if (S.navigated) {
+        finish('fail', 'FAIL: Chrome navigated the frame but no beacon was sent.');
+      }
+    }
+    if (age &gt; TIMEOUT_MS) {
+      finish('fail', 'FAIL: nothing happened within ' + Math.round(age / 1000) + ' s. Likely causes: the frame is not ad-tagged by Chrome, the tab was hidden or unfocused, the ad was clicked, or the Chrome heavy ad intervention is disabled.');
+    }
+  }
+
+  function report() {
+    var lines = [];
+    lines.push('Heavy ad test report');
+    lines.push('Page: ' + location.origin + location.pathname);
+    lines.push('Browser: ' + navigator.userAgent);
+    lines.push('Frame: ' + (S.frame ? (S.frame.id || S.frame.name || '(no id)') : 'none'));
+    if (S.opts) { lines.push('Options: beacon=' + (S.opts.real ? 'REAL' : 'capture') + ', burn=' + S.opts.burn + ', pixel=' + S.opts.pixel); }
+    lines.push('Verdict: ' + (S.verdictText || 'not finished'));
+    lines.push('Events:');
+    S.events.forEach(function (e) { lines.push('  +' + rel(e.t) + ' ' + e.kind + ' ' + e.msg); });
+    return lines.join('\n');
+  }
+
+  function copyReport() {
+    var text = report();
+    var done = function () { log('ACTION', 'Report copied to the clipboard'); };
+    try {
+      navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+    } catch (e) { fallbackCopy(text); done(); }
+  }
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+  }
+
+  function destroy() {
+    if (tickTimer) { clearInterval(tickTimer); }
+    stopBurn();
+    if (host.parentNode) { host.parentNode.removeChild(host); }
+    delete window.__heavyAdTester;
+  }
+
+  // ---------------------------------------------------------------- wire up
+  $('x').onclick = destroy;
+  $('rescan').onclick = rescan;
+  $('start').onclick = start;
+  $('stop').onclick = stop;
+  $('copy').onclick = copyReport;
+  tickTimer = setInterval(tick, 300);
+  rescan();
+  window.__heavyAdTester = { start: start, stop: stop, rescan: rescan, report: report, state: S, destroy: destroy };
+})();
+</textarea>
+</div>
+
+<h2>Option 2: bookmarklet</h2>
+<div class="box">
+<p>Drag this link to your bookmarks bar, then click it on any page:</p>
+<p><a class="bm" href="javascript:%2F*%0A%20*%20Heavy%20Ad%20Test%20Tool%0A%20*%0A%20*%20A%20panel%20you%20run%20inside%20any%20page%20(DevTools%20console%2C%20DevTools%20Snippet%20or%20bookmarklet).%0A%20*%20It%20finds%20ad%20iframes%2C%20installs%20the%20HEAVY_AD%20sample%20script%20into%20the%20one%20you%20pick%2C%20makes%20that%20frame%0A%20*%20burn%20CPU%20until%20Chrome%20removes%20it%2C%20and%20reports%20what%20the%20script%20did.%0A%20*%0A%20*%20Limits%3A%20Chrome%20only%20(other%20browsers%20have%20no%20heavy%20ad%20intervention).%20The%20frame%20must%20be%20reachable%0A%20*%20from%20this%20page%20(same%20origin%2C%20e.g.%20GPT%20friendly%20iframes).%20Cross-origin%20frames%20are%20listed%20but%20cannot%20be%20used.%0A%20*%20Do%20not%20click%20inside%20the%20ad%20(a%20click%20exempts%20it%20from%20the%20intervention).%20Keep%20the%20tab%20in%20front.%0A%20*%2F%0A(function%20()%20%7B%0A%20%20'use%20strict'%3B%0A%20%20if%20(window.__heavyAdTester%20%26%26%20window.__heavyAdTester.destroy)%20%7B%0A%20%20%20%20try%20%7B%20window.__heavyAdTester.destroy()%3B%20%7D%20catch%20(e)%20%7B%7D%0A%20%20%7D%0A%0A%20%20var%20DEFAULT_PIXEL%20%3D%20'https%3A%2F%2Fexample.com%2Fhv%3Fcid%3DTEST123%26bidder%3Dtestbidder%26size%3D300x250'%3B%0A%20%20var%20TIMEOUT_MS%20%3D%20150000%3B%0A%20%20var%20S%20%3D%20%7B%0A%20%20%20%20frame%3A%20null%2C%20win%3A%20null%2C%20startedAt%3A%200%2C%20running%3A%20false%2C%20finished%3A%20false%2C%0A%20%20%20%20events%3A%20%5B%5D%2C%20beacons%3A%20%5B%5D%2C%20navigated%3A%20false%2C%20gotCb%3A%20false%2C%20gotHide%3A%20false%2C%0A%20%20%20%20hideAt%3A%200%2C%20lastBeaconAt%3A%200%2C%20opts%3A%20null%2C%20verdictKind%3A%20''%2C%20verdictText%3A%20''%0A%20%20%7D%3B%0A%20%20var%20candidates%20%3D%20%5B%5D%3B%0A%20%20var%20tickTimer%20%3D%20null%3B%0A%0A%20%20%2F%2F%20----------------------------------------------------------------%20panel%0A%20%20var%20host%20%3D%20document.createElement('div')%3B%0A%20%20host.style.cssText%20%3D%20'all%3Ainitial%3Bposition%3Afixed%3Bright%3A12px%3Bbottom%3A12px%3Bz-index%3A2147483647%3B'%3B%0A%20%20var%20root%20%3D%20host.attachShadow(%7B%20mode%3A%20'open'%20%7D)%3B%0A%20%20root.innerHTML%20%3D%20%5B%0A%20%20%20%20'%3Cstyle%3E'%2C%0A%20%20%20%20'.p%7Bfont%3A12px%2F1.35%20system-ui%2Csans-serif%3Bcolor%3A%231a1a1a%3Bbackground%3A%23fff%3Bborder%3A1px%20solid%20%23777%3Bborder-radius%3A8px%3B'%2C%0A%20%20%20%20'box-shadow%3A0%204px%2018px%20rgba(0%2C0%2C0%2C.35)%3Bwidth%3A390px%3Bmax-height%3A84vh%3Boverflow%3Aauto%3Bpadding%3A8px%2010px%7D'%2C%0A%20%20%20%20'.h%7Bdisplay%3Aflex%3Bjustify-content%3Aspace-between%3Balign-items%3Acenter%3Bmargin-bottom%3A4px%3Bfont-size%3A13px%7D'%2C%0A%20%20%20%20'.s%7Bbackground%3A%23eef3fb%3Bborder%3A1px%20solid%20%23b9c9e6%3Bborder-radius%3A5px%3Bpadding%3A4px%206px%3Bmargin-bottom%3A4px%7D'%2C%0A%20%20%20%20'.w%7Bbackground%3A%23fff3cd%3Bborder%3A1px%20solid%20%23e6c866%3Bborder-radius%3A5px%3Bpadding%3A4px%206px%3Bmargin-bottom%3A4px%3Bdisplay%3Anone%7D'%2C%0A%20%20%20%20'.l%7Bmargin%3A6px%200%202px%3Bfont-weight%3A600%7D'%2C%0A%20%20%20%20'.fr%7Bborder%3A1px%20solid%20%23ccc%3Bborder-radius%3A5px%3Bmax-height%3A120px%3Boverflow%3Aauto%3Bpadding%3A2px%204px%7D'%2C%0A%20%20%20%20'.fr%20label%7Bdisplay%3Ablock%3Bpadding%3A1px%200%3Bword-break%3Abreak-all%7D'%2C%0A%20%20%20%20'.fr%20.no%7Bcolor%3A%23999%7D'%2C%0A%20%20%20%20'label.f%7Bdisplay%3Ablock%3Bmargin-top%3A4px%7D'%2C%0A%20%20%20%20'input%5Btype%3Dtext%5D%2Cselect%7Bwidth%3A100%25%3Bbox-sizing%3Aborder-box%3Bfont%3A11px%20system-ui%3Bpadding%3A2px%7D'%2C%0A%20%20%20%20'.b%7Bdisplay%3Aflex%3Bgap%3A6px%3Bmargin-top%3A6px%7D'%2C%0A%20%20%20%20'button%7Bfont%3A12px%20system-ui%3Bpadding%3A4px%208px%3Bcursor%3Apointer%7D'%2C%0A%20%20%20%20'button%5Bdisabled%5D%7Bopacity%3A.5%3Bcursor%3Anot-allowed%7D'%2C%0A%20%20%20%20'%23verdict%7Bmargin-top%3A6px%3Bpadding%3A6px%3Bborder-radius%3A5px%3Bdisplay%3Anone%7D'%2C%0A%20%20%20%20'%23verdict.pass%7Bdisplay%3Ablock%3Bbackground%3A%23bdf0bd%3Bborder%3A1px%20solid%20%236cc06c%7D'%2C%0A%20%20%20%20'%23verdict.fail%7Bdisplay%3Ablock%3Bbackground%3A%23ffc9c9%3Bborder%3A1px%20solid%20%23e07070%7D'%2C%0A%20%20%20%20'%23verdict.info%7Bdisplay%3Ablock%3Bbackground%3A%23fff3cd%3Bborder%3A1px%20solid%20%23e6c866%7D'%2C%0A%20%20%20%20'%23log%7Bmargin-top%3A6px%3Bfont%3A11px%2F1.3%20ui-monospace%2CConsolas%2Cmonospace%3Bmax-height%3A170px%3Boverflow%3Aauto%3Bborder-top%3A1px%20solid%20%23ddd%3Bpadding-top%3A4px%7D'%2C%0A%20%20%20%20'%23log%20div%7Bword-break%3Abreak-all%7D'%2C%0A%20%20%20%20'%23log%20.BEACON%7Bcolor%3A%230a7a0a%3Bfont-weight%3A700%7D%23log%20.diag%7Bcolor%3A%23555%7D%23log%20.PASS%7Bcolor%3A%230a7a0a%3Bfont-weight%3A700%7D'%2C%0A%20%20%20%20'%23log%20.FAIL%7Bcolor%3A%23b00020%3Bfont-weight%3A700%7D%23log%20.INFO%7Bcolor%3A%238a6d00%3Bfont-weight%3A700%7D%23log%20.ACTION%7Bcolor%3A%231a4fa0%3Bfont-weight%3A700%7D'%2C%0A%20%20%20%20'%3C%2Fstyle%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22p%22%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22h%22%3E%3Cb%3EHeavy%20ad%20test%20tool%3C%2Fb%3E%3Cbutton%20id%3D%22x%22%20title%3D%22Close%22%3Ex%3C%2Fbutton%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22s%22%3EFocus%3A%20%3Cb%20id%3D%22f%22%3E%3F%3C%2Fb%3E%20%7C%20Visible%3A%20%3Cb%20id%3D%22v%22%3E%3F%3C%2Fb%3E%20%7C%20Time%3A%20%3Cb%20id%3D%22t%22%3E-%3C%2Fb%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22w%22%20id%3D%22warn%22%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22l%22%3EAd%20frames%20(select%20one)%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22fr%22%20id%3D%22frames%22%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22b%22%3E%3Cbutton%20id%3D%22rescan%22%3ERescan%3C%2Fbutton%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Clabel%20class%3D%22f%22%3EPixel%20URL%3Cinput%20type%3D%22text%22%20id%3D%22pix%22%3E%3C%2Flabel%3E'%2C%0A%20%20%20%20'%3Clabel%20class%3D%22f%22%3EBeacon%3Cselect%20id%3D%22bm%22%3E%3Coption%20value%3D%22capture%22%3ECapture%20only%20(nothing%20is%20sent)%3C%2Foption%3E'%2C%0A%20%20%20%20'%3Coption%20value%3D%22real%22%3ESend%20a%20real%20beacon%3C%2Foption%3E%3C%2Fselect%3E%3C%2Flabel%3E'%2C%0A%20%20%20%20'%3Clabel%20class%3D%22f%22%3EBurn%3Cselect%20id%3D%22burn%22%3E%3Coption%20value%3D%22cpu%22%3ECPU%20burn%20(about%2094%25%20busy)%3C%2Foption%3E'%2C%0A%20%20%20%20'%3Coption%20value%3D%22block%22%3EBlock%20the%20thread%20for%2040%20s%20(page%20freezes)%3C%2Foption%3E%3C%2Fselect%3E%3C%2Flabel%3E'%2C%0A%20%20%20%20'%3Clabel%20class%3D%22f%22%3EMy%20creative%20HTML%20(optional%2C%20replaces%20the%20frame%20content)%3Ctextarea%20id%3D%22chtml%22%20rows%3D%223%22%20style%3D%22width%3A100%25%3Bbox-sizing%3Aborder-box%3Bfont%3A11px%20ui-monospace%2CConsolas%2Cmonospace%22%3E%3C%2Ftextarea%3E%3C%2Flabel%3E'%2C%0A%20%20%20%20'%3Clabel%20class%3D%22f%22%3E%3Cinput%20type%3D%22checkbox%22%20id%3D%22addsample%22%20checked%3E%20add%20the%20sample%20script%20to%20my%20creative%20%26nbsp%3B%3Cinput%20type%3D%22checkbox%22%20id%3D%22addburn%22%20checked%3E%20add%20the%20burn%3C%2Flabel%3E'%2C%0A%20%20%20%20'%3Clabel%20class%3D%22f%22%3E%3Cinput%20type%3D%22checkbox%22%20id%3D%22norefresh%22%20checked%3E%20Disable%20googletag%20refresh()%20during%20the%20test%3C%2Flabel%3E'%2C%0A%20%20%20%20'%3Cdiv%20class%3D%22b%22%3E%3Cbutton%20id%3D%22start%22%3EStart%20test%3C%2Fbutton%3E%3Cbutton%20id%3D%22stop%22%3EStop%3C%2Fbutton%3E%3Cbutton%20id%3D%22copy%22%3ECopy%20report%3C%2Fbutton%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20id%3D%22verdict%22%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3Cdiv%20id%3D%22log%22%3E%3C%2Fdiv%3E'%2C%0A%20%20%20%20'%3C%2Fdiv%3E'%0A%20%20%5D.join('')%3B%0A%20%20document.documentElement.appendChild(host)%3B%0A%20%20var%20%24%20%3D%20function%20(id)%20%7B%20return%20root.getElementById(id)%3B%20%7D%3B%0A%20%20%24('pix').value%20%3D%20DEFAULT_PIXEL%3B%0A%0A%20%20%2F%2F%20----------------------------------------------------------------%20helpers%0A%20%20function%20now()%20%7B%20return%20Date.now()%3B%20%7D%0A%20%20function%20rel(t)%20%7B%20return%20((t%20-%20(S.startedAt%20%7C%7C%20t))%20%2F%201000).toFixed(2)%20%2B%20's'%3B%20%7D%0A%20%20function%20short(u)%20%7B%20u%20%3D%20String(u)%3B%20return%20u.length%20%3E%2090%20%3F%20u.slice(0%2C%2090)%20%2B%20'...'%20%3A%20u%3B%20%7D%0A%0A%20%20function%20log(kind%2C%20msg)%20%7B%0A%20%20%20%20var%20e%20%3D%20%7B%20t%3A%20now()%2C%20kind%3A%20kind%2C%20msg%3A%20String(msg)%20%7D%3B%0A%20%20%20%20S.events.push(e)%3B%0A%20%20%20%20if%20(kind%20%3D%3D%3D%20'diag')%20%7B%0A%20%20%20%20%20%20if%20(%2F%5Eobserver%20callback%20got%20HeavyAdIntervention%2F.test(e.msg))%20%7B%20S.gotCb%20%3D%20true%3B%20%7D%0A%20%20%20%20%20%20if%20(%2F%5Epagehide%20fired%2F.test(e.msg))%20%7B%20S.gotHide%20%3D%20true%3B%20S.hideAt%20%3D%20e.t%3B%20%7D%0A%20%20%20%20%7D%0A%20%20%20%20var%20d%20%3D%20document.createElement('div')%3B%0A%20%20%20%20d.className%20%3D%20kind%3B%0A%20%20%20%20d.textContent%20%3D%20(S.startedAt%20%3F%20'%2B'%20%2B%20rel(e.t)%20%3A%20'--')%20%2B%20'%20%20'%20%2B%20kind%20%2B%20'%20%20'%20%2B%20e.msg%3B%0A%20%20%20%20var%20box%20%3D%20%24('log')%3B%0A%20%20%20%20box.appendChild(d)%3B%0A%20%20%20%20box.scrollTop%20%3D%20box.scrollHeight%3B%0A%20%20%7D%0A%0A%20%20function%20setVerdict(kind%2C%20text)%20%7B%0A%20%20%20%20S.verdictKind%20%3D%20kind%3B%0A%20%20%20%20S.verdictText%20%3D%20text%3B%0A%20%20%20%20var%20v%20%3D%20%24('verdict')%3B%0A%20%20%20%20v.className%20%3D%20kind%3B%0A%20%20%20%20v.textContent%20%3D%20text%3B%0A%20%20%7D%0A%0A%20%20%2F%2F%20----------------------------------------------------------------%20frame%20discovery%0A%20%20function%20collect(doc%2C%20depth%2C%20out)%20%7B%0A%20%20%20%20var%20list%20%3D%20doc.querySelectorAll('iframe')%3B%0A%20%20%20%20for%20(var%20i%20%3D%200%3B%20i%20%3C%20list.length%3B%20i%2B%2B)%20%7B%0A%20%20%20%20%20%20var%20f%20%3D%20list%5Bi%5D%3B%0A%20%20%20%20%20%20var%20r%20%3D%20f.getBoundingClientRect()%3B%0A%20%20%20%20%20%20var%20d%20%3D%20null%3B%0A%20%20%20%20%20%20try%20%7B%20d%20%3D%20f.contentDocument%3B%20%7D%20catch%20(e)%20%7B%20d%20%3D%20null%3B%20%7D%0A%20%20%20%20%20%20var%20entry%20%3D%20%7B%0A%20%20%20%20%20%20%20%20el%3A%20f%2C%20acc%3A%20!!d%2C%20id%3A%20f.id%20%7C%7C%20f.name%20%7C%7C%20'(no%20id)'%2C%20w%3A%20Math.round(r.width)%2C%20h%3A%20Math.round(r.height)%2C%0A%20%20%20%20%20%20%20%20bodyLen%3A%20d%20%26%26%20d.body%20%3F%20d.body.innerHTML.length%20%3A%200%2C%20nested%3A%20d%20%3F%20d.querySelectorAll('iframe').length%20%3A%200%2C%20depth%3A%20depth%0A%20%20%20%20%20%20%7D%3B%0A%20%20%20%20%20%20if%20(entry.w%20%3E%3D%2050%20%26%26%20entry.h%20%3E%3D%2040)%20%7B%20out.push(entry)%3B%20%7D%0A%20%20%20%20%20%20if%20(d%20%26%26%20depth%20%3C%202)%20%7B%20collect(d%2C%20depth%20%2B%201%2C%20out)%3B%20%7D%0A%20%20%20%20%7D%0A%20%20%7D%0A%0A%20%20var%20lastScan%20%3D%200%3B%0A%20%20function%20rescan()%20%7B%0A%20%20%20%20lastScan%20%3D%20now()%3B%0A%20%20%20%20candidates%20%3D%20%5B%5D%3B%0A%20%20%20%20collect(document%2C%200%2C%20candidates)%3B%0A%20%20%20%20candidates.sort(function%20(a%2C%20b)%20%7B%0A%20%20%20%20%20%20var%20sa%20%3D%20(a.acc%20%3F%202%20%3A%200)%20%2B%20(%2Fgoogle_ads%7Cdfp%7Cgpt%7Cbanner%7Cad%2Fi.test(a.id)%20%3F%201%20%3A%200)%3B%0A%20%20%20%20%20%20var%20sb%20%3D%20(b.acc%20%3F%202%20%3A%200)%20%2B%20(%2Fgoogle_ads%7Cdfp%7Cgpt%7Cbanner%7Cad%2Fi.test(b.id)%20%3F%201%20%3A%200)%3B%0A%20%20%20%20%20%20return%20sb%20-%20sa%3B%0A%20%20%20%20%7D)%3B%0A%20%20%20%20var%20box%20%3D%20%24('frames')%3B%0A%20%20%20%20box.textContent%20%3D%20''%3B%0A%20%20%20%20if%20(!candidates.length)%20%7B%0A%20%20%20%20%20%20box.textContent%20%3D%20'No%20iframes%20of%20a%20usable%20size%20found.%20Scroll%20so%20ads%20load%2C%20then%20Rescan.'%3B%0A%20%20%20%20%20%20S.frame%20%3D%20null%3B%0A%20%20%20%20%20%20return%3B%0A%20%20%20%20%7D%0A%20%20%20%20var%20chosen%20%3D%20false%3B%0A%20%20%20%20candidates.forEach(function%20(c%2C%20i)%20%7B%0A%20%20%20%20%20%20var%20lab%20%3D%20document.createElement('label')%3B%0A%20%20%20%20%20%20var%20rb%20%3D%20document.createElement('input')%3B%0A%20%20%20%20%20%20rb.type%20%3D%20'radio'%3B%0A%20%20%20%20%20%20rb.name%20%3D%20'fr'%3B%0A%20%20%20%20%20%20rb.disabled%20%3D%20!c.acc%3B%0A%20%20%20%20%20%20rb.onchange%20%3D%20function%20()%20%7B%20S.frame%20%3D%20c.el%3B%20%7D%3B%0A%20%20%20%20%20%20if%20(!chosen%20%26%26%20c.acc%20%26%26%20c.bodyLen%20%3E%201000)%20%7B%20rb.checked%20%3D%20true%3B%20S.frame%20%3D%20c.el%3B%20chosen%20%3D%20true%3B%20%7D%0A%20%20%20%20%20%20lab.appendChild(rb)%3B%0A%20%20%20%20%20%20lab.appendChild(document.createTextNode('%20'%20%2B%20c.id%20%2B%20'%20('%20%2B%20c.w%20%2B%20'x'%20%2B%20c.h%20%2B%20'%2C%20'%20%2B%20(c.acc%20%3F%20Math.round(c.bodyLen%20%2F%201000)%20%2B%20'%20KB%2C%20'%20%2B%20c.nested%20%2B%20'%20nested'%20%3A%20'not%20reachable%2C%20cross-origin')%20%2B%20')'))%3B%0A%20%20%20%20%20%20if%20(!c.acc)%20%7B%20lab.className%20%3D%20'no'%3B%20%7D%0A%20%20%20%20%20%20box.appendChild(lab)%3B%0A%20%20%20%20%7D)%3B%0A%20%20%20%20if%20(!chosen)%20%7B%20S.frame%20%3D%20null%3B%20%7D%0A%20%20%7D%0A%0A%20%20%2F%2F%20----------------------------------------------------------------%20code%20injected%20into%20the%20ad%20frame%0A%20%20function%20buildFrameCode(o)%20%7B%0A%20%20%20%20var%20burn%20%3D%20o.burn%20%3D%3D%3D%20'block'%0A%20%20%20%20%20%20%3F%20'setTimeout(function()%7Bvar%20s%3DDate.now()%3Bwhile(Date.now()-s%3C40000)%7BMath.sqrt(Math.random())%3B%7D%7D%2C0)%3B'%0A%20%20%20%20%20%20%3A%20'window.__stopBurn%3Dfalse%3B(function%20burn()%7Bif(window.__stopBurn)%7Breturn%3B%7Dvar%20s%3Dperformance.now()%3Bwhile(performance.now()-s%3C80)%7BMath.sqrt(Math.random())%3B%7DsetTimeout(burn%2C5)%3B%7D)()%3B'%3B%0A%20%20%20%20var%20sample%20%3D%20%5B%0A%20%20%20%20%20%20'(function%20()%20%7B'%2C%0A%20%20%20%20%20%20'var%20PIXEL%20%3D%20'%20%2B%20JSON.stringify(o.pixel)%20%2B%20'%3B'%2C%0A%20%20%20%20%20%20'function%20send(reports)%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20for%20(var%20i%20%3D%200%3B%20i%20%3C%20reports.length%3B%20i%2B%2B)%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20try%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20var%20body%20%3D%20reports%5Bi%5D.body%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20if%20(!body%20%7C%7C%20body.id%20!%3D%3D%20%22HeavyAdIntervention%22)%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20continue%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%7D'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20var%20sep%20%3D%20%22%26%22%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20navigator.sendBeacon(PIXEL%20%2B%20sep%20%2B%20%22rd%3D%22%20%2B%20encodeURIComponent(JSON.stringify(%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20message%3A%20body.message%2C'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20sourceFile%3A%20body.sourceFile%2C'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20lineNumber%3A%20body.lineNumber%2C'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20columnNumber%3A%20body.columnNumber'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%20%20%20%20%7D)))%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%7D%20catch%20(e)%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20%7D'%2C%0A%20%20%20%20%20%20'%20%20%20%20%7D'%2C%0A%20%20%20%20%20%20'%7D'%2C%0A%20%20%20%20%20%20'try%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20var%20observer%20%3D%20new%20ReportingObserver(send%2C%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20types%3A%20%5B%22intervention%22%5D%2C'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20buffered%3A%20true'%2C%0A%20%20%20%20%20%20'%20%20%20%20%7D)%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20observer.observe()%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20window.addEventListener(%22pagehide%22%2C%20function%20()%20%7B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%20%20%20%20send(observer.takeRecords())%3B'%2C%0A%20%20%20%20%20%20'%20%20%20%20%7D)%3B'%2C%0A%20%20%20%20%20%20'%7D%20catch%20(e)%20%7B'%2C%0A%20%20%20%20%20%20'%7D'%2C%0A%20%20%20%20%20%20'%7D)()%3B'%0A%20%20%20%20%5D.join('%5Cn')%3B%0A%20%20%20%20return%20%5B%0A%20%20%20%20%20%20'(function%20()%20%7B'%2C%0A%20%20%20%20%20%20'var%20L%20%3D%20window.__hatLog%2C%20B%20%3D%20window.__hatBeacon%2C%20real%20%3D%20'%20%2B%20(o.real%20%3F%20'true'%20%3A%20'false')%20%2B%20'%3B'%2C%0A%20%20%20%20%20%20'var%20origSB%20%3D%20navigator.sendBeacon.bind(navigator)%3B'%2C%0A%20%20%20%20%20%20'navigator.sendBeacon%20%3D%20function%20(u%2C%20d)%20%7B'%2C%0A%20%20%20%20%20%20'%20%20var%20ok%20%3D%20true%3B'%2C%0A%20%20%20%20%20%20'%20%20if%20(real)%20%7B%20ok%20%3D%20false%3B%20try%20%7B%20ok%20%3D%20origSB(u%2C%20d)%3B%20%7D%20catch%20(e)%20%7B%20try%20%7B%20L(%22diag%22%2C%20%22sendBeacon%20threw%20%22%20%2B%20e.name)%3B%20%7D%20catch%20(x)%20%7B%7D%20%7D%20%7D'%2C%0A%20%20%20%20%20%20'%20%20try%20%7B%20B(String(u)%2C%20ok)%3B%20%7D%20catch%20(e)%20%7B%7D'%2C%0A%20%20%20%20%20%20'%20%20return%20ok%3B'%2C%0A%20%20%20%20%20%20'%7D%3B'%2C%0A%20%20%20%20%20%20'document.addEventListener(%22securitypolicyviolation%22%2C%20function%20(e)%20%7B%20try%20%7B%20L(%22diag%22%2C%20%22CSP%20violation%3A%20%22%20%2B%20e.violatedDirective)%3B%20%7D%20catch%20(x)%20%7B%7D%20%7D)%3B'%2C%0A%20%20%20%20%20%20'try%20%7B%20new%20ReportingObserver(function%20(r)%20%7B%20r.forEach(function%20(x)%20%7B%20try%20%7B%20L(%22diag%22%2C%20%22observer%20callback%20got%20%22%20%2B%20(x.body%20%26%26%20x.body.id))%3B%20%7D%20catch%20(e)%20%7B%7D%20%7D)%3B%20%7D%2C%20%7B%20types%3A%20%5B%22intervention%22%5D%2C%20buffered%3A%20true%20%7D).observe()%3B%20%7D%20catch%20(e)%20%7B%7D'%2C%0A%20%20%20%20%20%20'window.addEventListener(%22pagehide%22%2C%20function%20()%20%7B%20try%20%7B%20L(%22diag%22%2C%20%22pagehide%20fired%20in%20ad%20frame%22)%3B%20%7D%20catch%20(x)%20%7B%7D%20%7D)%3B'%2C%0A%20%20%20%20%20%20'%2F%2F%20----%20sample%20script%20under%20test%20----'%2C%0A%20%20%20%20%20%20o.addSample%20%3D%3D%3D%20false%20%3F%20''%20%3A%20sample%2C%0A%20%20%20%20%20%20'%2F%2F%20----%20load%20generator%20----'%2C%0A%20%20%20%20%20%20o.addBurn%20%3D%3D%3D%20false%20%3F%20''%20%3A%20burn%2C%0A%20%20%20%20%20%20'try%20%7B%20L(%22diag%22%2C%20%22installed%20in%20the%20ad%20frame%2C%20load%20started%22)%3B%20%7D%20catch%20(e)%20%7B%7D'%2C%0A%20%20%20%20%20%20'%7D)()%3B'%0A%20%20%20%20%5D.join('%5Cn')%3B%0A%20%20%7D%0A%0A%20%20%2F%2F%20----------------------------------------------------------------%20run%0A%20%20function%20stopBurn()%20%7B%20try%20%7B%20if%20(S.win)%20%7B%20S.win.__stopBurn%20%3D%20true%3B%20%7D%20%7D%20catch%20(e)%20%7B%7D%20%7D%0A%0A%20%20function%20finish(kind%2C%20text)%20%7B%0A%20%20%20%20if%20(S.finished)%20%7B%20return%3B%20%7D%0A%20%20%20%20S.finished%20%3D%20true%3B%0A%20%20%20%20S.running%20%3D%20false%3B%0A%20%20%20%20stopBurn()%3B%0A%20%20%20%20setVerdict(kind%2C%20text)%3B%0A%20%20%20%20log(kind.toUpperCase()%2C%20text)%3B%0A%20%20%20%20%24('start').disabled%20%3D%20false%3B%0A%20%20%20%20%24('t').textContent%20%3D%20'done'%3B%0A%20%20%7D%0A%0A%20%20function%20start()%20%7B%0A%20%20%20%20if%20(S.running)%20%7B%20return%3B%20%7D%0A%20%20%20%20var%20fr%20%3D%20S.frame%3B%0A%20%20%20%20if%20(!fr%20%7C%7C%20!fr.isConnected)%20%7B%20setVerdict('fail'%2C%20'Select%20a%20reachable%20ad%20frame%20first%20(Rescan%20if%20the%20list%20is%20empty).')%3B%20return%3B%20%7D%0A%20%20%20%20var%20w%2C%20d%3B%0A%20%20%20%20try%20%7B%20w%20%3D%20fr.contentWindow%3B%20d%20%3D%20fr.contentDocument%3B%20if%20(!d%20%7C%7C%20!d.body)%20%7B%20throw%20new%20Error('no%20document')%3B%20%7D%20%7D%0A%20%20%20%20catch%20(e)%20%7B%20setVerdict('fail'%2C%20'That%20frame%20is%20not%20reachable%20from%20this%20page%20(cross-origin).')%3B%20return%3B%20%7D%0A%20%20%20%20var%20custom%20%3D%20%24('chtml').value%3B%0A%20%20%20%20var%20o%20%3D%20%7B%0A%20%20%20%20%20%20pixel%3A%20%24('pix').value.trim()%20%7C%7C%20DEFAULT_PIXEL%2C%20real%3A%20%24('bm').value%20%3D%3D%3D%20'real'%2C%20burn%3A%20%24('burn').value%2C%0A%20%20%20%20%20%20custom%3A%20custom%2C%20addSample%3A%20custom.trim()%20%3F%20%24('addsample').checked%20%3A%20true%2C%20addBurn%3A%20custom.trim()%20%3F%20%24('addburn').checked%20%3A%20true%0A%20%20%20%20%7D%3B%0A%20%20%20%20if%20(o.real%20%26%26%20!window.confirm('Send%20ONE%20real%20beacon%20to%20this%20URL%20when%20the%20ad%20is%20removed%3F%5Cn%5Cn'%20%2B%20o.pixel))%20%7B%20return%3B%20%7D%0A%0A%20%20%20%20S.events%20%3D%20%5B%5D%3B%20S.beacons%20%3D%20%5B%5D%3B%20S.navigated%20%3D%20false%3B%20S.gotCb%20%3D%20false%3B%20S.gotHide%20%3D%20false%3B%0A%20%20%20%20S.hideAt%20%3D%200%3B%20S.lastBeaconAt%20%3D%200%3B%20S.finished%20%3D%20false%3B%20S.win%20%3D%20w%3B%20S.opts%20%3D%20o%3B%0A%20%20%20%20%24('log').textContent%20%3D%20''%3B%0A%20%20%20%20setVerdict(''%2C%20'')%3B%0A%20%20%20%20%24('verdict').className%20%3D%20''%3B%0A%20%20%20%20S.startedAt%20%3D%20now()%3B%0A%20%20%20%20S.running%20%3D%20true%3B%0A%20%20%20%20%24('start').disabled%20%3D%20true%3B%0A%0A%20%20%20%20if%20(%24('norefresh').checked)%20%7B%0A%20%20%20%20%20%20try%20%7B%20window.googletag.pubads().refresh%20%3D%20function%20()%20%7B%20return%3B%20%7D%3B%20log('ACTION'%2C%20'googletag%20refresh()%20disabled%20for%20this%20page%20view%20(reload%20the%20page%20to%20undo)')%3B%20%7D%20catch%20(e)%20%7B%7D%0A%20%20%20%20%7D%0A%20%20%20%20var%20hatLog%20%3D%20function%20(k%2C%20m)%20%7B%20log(k%2C%20m)%3B%20%7D%3B%0A%20%20%20%20var%20hatBeacon%20%3D%20function%20(u%2C%20ok)%20%7B%0A%20%20%20%20%20%20S.beacons.push(%7B%20t%3A%20now()%2C%20url%3A%20u%2C%20queued%3A%20ok%20%7D)%3B%0A%20%20%20%20%20%20S.lastBeaconAt%20%3D%20now()%3B%0A%20%20%20%20%20%20log('BEACON'%2C%20'sendBeacon%20called'%20%2B%20(o.real%20%3F%20''%20%3A%20'%20(captured%2C%20not%20sent)')%20%2B%20'%2C%20queued%3D'%20%2B%20ok%20%2B%20'%20url%3D'%20%2B%20short(u))%3B%0A%20%20%20%20%7D%3B%0A%20%20%20%20w.__hatLog%20%3D%20hatLog%3B%0A%20%20%20%20w.__hatBeacon%20%3D%20hatBeacon%3B%0A%20%20%20%20fr.addEventListener('load'%2C%20function%20()%20%7B%0A%20%20%20%20%20%20if%20(now()%20-%20S.startedAt%20%3C%201500)%20%7B%20return%3B%20%7D%20%2F%2F%20our%20own%20write%20also%20fires%20load%0A%20%20%20%20%20%20S.navigated%20%3D%20true%3B%0A%20%20%20%20%20%20log('diag'%2C%20'ad%20iframe%20element%20fired%20load%20(frame%20navigated)')%3B%0A%20%20%20%20%7D)%3B%0A%0A%20%20%20%20log('ACTION'%2C%20'Start%20%7C%20focus%3A%20'%20%2B%20document.hasFocus()%20%2B%20'%20%7C%20visibility%3A%20'%20%2B%20document.visibilityState%20%2B%20'%20%7C%20beacon%3A%20'%20%2B%20(o.real%20%3F%20'REAL'%20%3A%20'capture%20only')%20%2B%20'%20%7C%20burn%3A%20'%20%2B%20o.burn)%3B%0A%20%20%20%20try%20%7B%0A%20%20%20%20%20%20if%20(o.custom.trim())%20%7B%0A%20%20%20%20%20%20%20%20d.open()%3B%0A%20%20%20%20%20%20%20%20var%20w2%20%3D%20fr.contentWindow%3B%0A%20%20%20%20%20%20%20%20w2.__hatLog%20%3D%20hatLog%3B%0A%20%20%20%20%20%20%20%20w2.__hatBeacon%20%3D%20hatBeacon%3B%0A%20%20%20%20%20%20%20%20S.win%20%3D%20w2%3B%0A%20%20%20%20%20%20%20%20d.write(o.custom%20%2B%20'%3Cscript%3E'%20%2B%20buildFrameCode(o)%20%2B%20'%3C%5C%2Fscript%3E')%3B%0A%20%20%20%20%20%20%20%20d.close()%3B%0A%20%20%20%20%20%20%20%20log('ACTION'%2C%20'Replaced%20the%20frame%20content%20with%20your%20creative'%20%2B%20(o.addSample%20%3F%20'%2C%20sample%20script%20added'%20%3A%20'')%20%2B%20(o.addBurn%20%3F%20'%2C%20burn%20added'%20%3A%20''))%3B%0A%20%20%20%20%20%20%7D%20else%20%7B%0A%20%20%20%20%20%20%20%20var%20s%20%3D%20d.createElement('script')%3B%0A%20%20%20%20%20%20%20%20s.textContent%20%3D%20buildFrameCode(o)%3B%0A%20%20%20%20%20%20%20%20d.body.appendChild(s)%3B%0A%20%20%20%20%20%20%7D%0A%20%20%20%20%7D%20catch%20(e)%20%7B%0A%20%20%20%20%20%20finish('fail'%2C%20'Could%20not%20install%20into%20the%20frame%3A%20'%20%2B%20e.message)%3B%0A%20%20%20%20%7D%0A%20%20%7D%0A%0A%20%20function%20stop()%20%7B%0A%20%20%20%20if%20(S.running)%20%7B%20finish('info'%2C%20'Stopped%20by%20you.%20The%20burn%20loop%20was%20told%20to%20stop.')%3B%20%7D%20else%20%7B%20stopBurn()%3B%20%7D%0A%20%20%7D%0A%0A%20%20function%20pathText()%20%7B%20return%20S.gotCb%20%3F%20'the%20observer%20callback%20ran'%20%3A%20'only%20pagehide%20ran%3A%20the%20report%20was%20drained%20by%20takeRecords()%20(callback%20never%20ran)'%3B%20%7D%0A%0A%20%20function%20tick()%20%7B%0A%20%20%20%20%24('f').textContent%20%3D%20document.hasFocus()%20%3F%20'YES'%20%3A%20'NO%20(click%20the%20page%20background%2C%20not%20the%20ad)'%3B%0A%20%20%20%20%24('v').textContent%20%3D%20document.visibilityState%3B%0A%20%20%20%20var%20warn%20%3D%20%5B%5D%3B%0A%20%20%20%20if%20(%2FAndroid%7CMobile%7CiPhone%2F.test(navigator.userAgent))%20%7B%20warn.push('Mobile%20user%20agent%3A%20device%20emulation%20looks%20ON.%20Ad%20slots%20differ%20from%20desktop%3B%20turn%20it%20off.')%3B%20%7D%0A%20%20%20%20if%20(!%2FChrome%5C%2F%2F.test(navigator.userAgent))%20%7B%20warn.push('Not%20Chrome%3A%20the%20heavy%20ad%20intervention%20only%20exists%20in%20Chrome.')%3B%20%7D%0A%20%20%20%20%24('warn').style.display%20%3D%20warn.length%20%3F%20'block'%20%3A%20'none'%3B%0A%20%20%20%20%24('warn').textContent%20%3D%20warn.join('%20')%3B%0A%20%20%20%20if%20(!S.running%20%26%26%20(!S.frame%20%7C%7C%20!S.frame.isConnected)%20%26%26%20now()%20-%20lastScan%20%3E%202000)%20%7B%20rescan()%3B%20%7D%0A%20%20%20%20if%20(!S.running%20%7C%7C%20S.finished)%20%7B%20return%3B%20%7D%0A%20%20%20%20var%20t%20%3D%20now()%2C%20age%20%3D%20t%20-%20S.startedAt%3B%0A%20%20%20%20%24('t').textContent%20%3D%20Math.round(age%20%2F%201000)%20%2B%20'%20s'%3B%0A%20%20%20%20if%20(S.beacons.length%20%3E%200%20%26%26%20t%20-%20S.lastBeaconAt%20%3E%201500)%20%7B%0A%20%20%20%20%20%20var%20n%20%3D%20S.beacons.length%3B%0A%20%20%20%20%20%20finish(n%20%3D%3D%3D%201%20%3F%20'pass'%20%3A%20'fail'%2C%0A%20%20%20%20%20%20%20%20(n%20%3D%3D%3D%201%20%3F%20'PASS%3A%20exactly%20one%20beacon.%20'%20%3A%20'FAIL%3A%20'%20%2B%20n%20%2B%20'%20beacons%2C%20expected%20one.%20')%20%2B%0A%20%20%20%20%20%20%20%20'Path%3A%20'%20%2B%20pathText()%20%2B%20'.%20Removed%20after%20'%20%2B%20rel(S.beacons%5B0%5D.t)%20%2B%20'.%20Mode%3A%20'%20%2B%0A%20%20%20%20%20%20%20%20(S.opts.real%20%3F%20'REAL%20send%20(check%20your%20Network%20tab%20for%20the%20ping)'%20%3A%20'capture%20only%2C%20nothing%20was%20sent')%20%2B%20'.')%3B%0A%20%20%20%20%20%20return%3B%0A%20%20%20%20%7D%0A%20%20%20%20if%20(S.gotHide%20%26%26%20S.beacons.length%20%3D%3D%3D%200%20%26%26%20t%20-%20S.hideAt%20%3E%201800)%20%7B%0A%20%20%20%20%20%20if%20(S.frame%20%26%26%20!S.frame.isConnected)%20%7B%0A%20%20%20%20%20%20%20%20finish('info'%2C%20'The%20page%20itself%20removed%20or%20replaced%20the%20frame%20(for%20example%20an%20ad%20refresh)%2C%20not%20Chrome.%20No%20beacon%20was%20sent%2C%20which%20is%20correct.%20Rescan%2C%20pick%20a%20frame%20and%20retry.')%3B%0A%20%20%20%20%20%20%7D%20else%20if%20(S.navigated)%20%7B%0A%20%20%20%20%20%20%20%20finish('fail'%2C%20'FAIL%3A%20Chrome%20navigated%20the%20frame%20but%20no%20beacon%20was%20sent.')%3B%0A%20%20%20%20%20%20%7D%0A%20%20%20%20%7D%0A%20%20%20%20if%20(age%20%3E%20TIMEOUT_MS)%20%7B%0A%20%20%20%20%20%20finish('fail'%2C%20'FAIL%3A%20nothing%20happened%20within%20'%20%2B%20Math.round(age%20%2F%201000)%20%2B%20'%20s.%20Likely%20causes%3A%20the%20frame%20is%20not%20ad-tagged%20by%20Chrome%2C%20the%20tab%20was%20hidden%20or%20unfocused%2C%20the%20ad%20was%20clicked%2C%20or%20the%20Chrome%20heavy%20ad%20intervention%20is%20disabled.')%3B%0A%20%20%20%20%7D%0A%20%20%7D%0A%0A%20%20function%20report()%20%7B%0A%20%20%20%20var%20lines%20%3D%20%5B%5D%3B%0A%20%20%20%20lines.push('Heavy%20ad%20test%20report')%3B%0A%20%20%20%20lines.push('Page%3A%20'%20%2B%20location.origin%20%2B%20location.pathname)%3B%0A%20%20%20%20lines.push('Browser%3A%20'%20%2B%20navigator.userAgent)%3B%0A%20%20%20%20lines.push('Frame%3A%20'%20%2B%20(S.frame%20%3F%20(S.frame.id%20%7C%7C%20S.frame.name%20%7C%7C%20'(no%20id)')%20%3A%20'none'))%3B%0A%20%20%20%20if%20(S.opts)%20%7B%20lines.push('Options%3A%20beacon%3D'%20%2B%20(S.opts.real%20%3F%20'REAL'%20%3A%20'capture')%20%2B%20'%2C%20burn%3D'%20%2B%20S.opts.burn%20%2B%20'%2C%20pixel%3D'%20%2B%20S.opts.pixel)%3B%20%7D%0A%20%20%20%20lines.push('Verdict%3A%20'%20%2B%20(S.verdictText%20%7C%7C%20'not%20finished'))%3B%0A%20%20%20%20lines.push('Events%3A')%3B%0A%20%20%20%20S.events.forEach(function%20(e)%20%7B%20lines.push('%20%20%2B'%20%2B%20rel(e.t)%20%2B%20'%20'%20%2B%20e.kind%20%2B%20'%20'%20%2B%20e.msg)%3B%20%7D)%3B%0A%20%20%20%20return%20lines.join('%5Cn')%3B%0A%20%20%7D%0A%0A%20%20function%20copyReport()%20%7B%0A%20%20%20%20var%20text%20%3D%20report()%3B%0A%20%20%20%20var%20done%20%3D%20function%20()%20%7B%20log('ACTION'%2C%20'Report%20copied%20to%20the%20clipboard')%3B%20%7D%3B%0A%20%20%20%20try%20%7B%0A%20%20%20%20%20%20navigator.clipboard.writeText(text).then(done%2C%20function%20()%20%7B%20fallbackCopy(text)%3B%20done()%3B%20%7D)%3B%0A%20%20%20%20%7D%20catch%20(e)%20%7B%20fallbackCopy(text)%3B%20done()%3B%20%7D%0A%20%20%7D%0A%20%20function%20fallbackCopy(text)%20%7B%0A%20%20%20%20var%20ta%20%3D%20document.createElement('textarea')%3B%0A%20%20%20%20ta.value%20%3D%20text%3B%0A%20%20%20%20ta.style.cssText%20%3D%20'position%3Afixed%3Bleft%3A-9999px'%3B%0A%20%20%20%20document.body.appendChild(ta)%3B%0A%20%20%20%20ta.select()%3B%0A%20%20%20%20try%20%7B%20document.execCommand('copy')%3B%20%7D%20catch%20(e)%20%7B%7D%0A%20%20%20%20ta.remove()%3B%0A%20%20%7D%0A%0A%20%20function%20destroy()%20%7B%0A%20%20%20%20if%20(tickTimer)%20%7B%20clearInterval(tickTimer)%3B%20%7D%0A%20%20%20%20stopBurn()%3B%0A%20%20%20%20if%20(host.parentNode)%20%7B%20host.parentNode.removeChild(host)%3B%20%7D%0A%20%20%20%20delete%20window.__heavyAdTester%3B%0A%20%20%7D%0A%0A%20%20%2F%2F%20----------------------------------------------------------------%20wire%20up%0A%20%20%24('x').onclick%20%3D%20destroy%3B%0A%20%20%24('rescan').onclick%20%3D%20rescan%3B%0A%20%20%24('start').onclick%20%3D%20start%3B%0A%20%20%24('stop').onclick%20%3D%20stop%3B%0A%20%20%24('copy').onclick%20%3D%20copyReport%3B%0A%20%20tickTimer%20%3D%20setInterval(tick%2C%20300)%3B%0A%20%20rescan()%3B%0A%20%20window.__heavyAdTester%20%3D%20%7B%20start%3A%20start%2C%20stop%3A%20stop%2C%20rescan%3A%20rescan%2C%20report%3A%20report%2C%20state%3A%20S%2C%20destroy%3A%20destroy%20%7D%3B%0A%7D)()%3B%0A%0Avoid%200%3B">Heavy ad test</a></p>
+<p>Some sites block bookmarklets. If nothing appears, use Option 1.</p>
+</div>
+
+<h2>Using the panel</h2>
+<ol>
+<li>Pick an ad frame from the list. Only same-origin frames (for example Google ad frames named <code>google_ads_iframe_...</code>) can be used. Cross-origin frames are listed greyed out.</li>
+<li>Leave <b>Capture only</b> selected to send nothing, or choose <b>Send a real beacon</b> to send exactly one to the pixel URL you set.</li>
+<li>Click <b>Start test</b>. Keep the tab in front and do not click inside the ad.</li>
+<li>Wait about 20 s. The panel shows PASS, FAIL or INFO, and a timeline. <b>Copy report</b> copies it as text.</li>
+</ol>
+<p>See README.md for what each verdict means.</p>
+<script>
+document.getElementById('copy').onclick=function(){var t=document.getElementById('code');t.select();
+try{navigator.clipboard.writeText(t.value).then(function(){document.getElementById('msg').textContent='Copied.';},function(){document.execCommand('copy');document.getElementById('msg').textContent='Copied.';});}catch(e){document.execCommand('copy');document.getElementById('msg').textContent='Copied.';}};
+</script>
+</body></html>

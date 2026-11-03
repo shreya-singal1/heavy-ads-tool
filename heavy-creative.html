@@ -1,0 +1,100 @@
+<!--
+  HEAVY AD TEST CREATIVE
+  Paste this whole file into a Google Ad Manager "Custom HTML" creative.
+
+  Before you save it:
+    1. Replace HEAVY_AD_PIXEL below with your real pixel URL (with the fields you want: creative, bidder, size,
+       format, domain, page URL). The script appends "&rd=<encoded report>" to it, so the URL must already
+       contain a "?".
+    2. Optionally change the settings in the HAT object.
+    3. If you want to test with a normal frame, untick "Serve into a SafeFrame" on the creative.
+
+  What it does: arms your heavy ad sample script, then burns CPU on purpose so that Chrome removes the ad
+  (15 s of main-thread CPU in any 30 s window, or 60 s in total, or more than 4 MB of network).
+  Do not click the ad. Keep the page tab in front.
+-->
+<div id="hat-box" style="font:13px/1.4 system-ui,sans-serif;background:#ffe9a8;border:2px solid #c90;padding:8px;box-sizing:border-box;width:100%;height:100%;overflow:hidden">
+  <b>HEAVY AD TEST CREATIVE</b><br>
+  Status: <span id="hat-s">starting</span><br>
+  Chrome should remove this ad about 15 to 60 s after it loads. Do not click it.
+</div>
+
+<script>
+// ---- settings ----
+var HAT = {
+  cpuBurn: true,        // keep the main thread busy
+  cpuBusyMs: 80,        // busy time per cycle, a 5 ms rest follows (about 94% busy)
+  networkUrl: "",       // optional: a large file to download repeatedly (needs CORS or no-cors access)
+  networkRepeats: 0     // how many times to download networkUrl (4 MB total is enough to trigger)
+};
+</script>
+
+<script>
+// ---- the heavy ad sample script under test (unchanged apart from the PIXEL value) ----
+(function () {
+var PIXEL = "HEAVY_AD_PIXEL";
+
+
+function send(reports) {
+    for (var i = 0; i < reports.length; i++) {
+        try {
+            var body = reports[i].body;
+            if (!body || body.id !== "HeavyAdIntervention") {
+                continue;
+            }
+            var sep = "&";
+            navigator.sendBeacon(PIXEL + sep + "rd=" + encodeURIComponent(JSON.stringify({
+                message: body.message,
+                sourceFile: body.sourceFile,
+                lineNumber: body.lineNumber,
+                columnNumber: body.columnNumber
+            })));
+        } catch (e) {
+        }
+    }
+}
+
+try {
+    var observer = new ReportingObserver(send, {
+        types: ["intervention"],
+        buffered: true
+    });
+    observer.observe();
+    window.addEventListener("pagehide", function () {
+        send(observer.takeRecords());
+    });
+} catch (e) {
+}
+
+})();
+</script>
+
+<script>
+// ---- load generator: makes this ad heavy on purpose ----
+(function () {
+  var started = Date.now();
+  var status = document.getElementById("hat-s");
+  function tickStatus() {
+    if (status) { status.textContent = "burning, " + Math.round((Date.now() - started) / 1000) + " s"; }
+  }
+  setInterval(tickStatus, 1000);
+
+  if (HAT.cpuBurn) {
+    (function burn() {
+      var s = performance.now();
+      while (performance.now() - s < HAT.cpuBusyMs) { Math.sqrt(Math.random()); }
+      setTimeout(burn, 5);
+    })();
+  }
+
+  if (HAT.networkUrl && HAT.networkRepeats > 0) {
+    var n = 0;
+    (function next() {
+      if (n++ >= HAT.networkRepeats) { return; }
+      fetch(HAT.networkUrl + (HAT.networkUrl.indexOf("?") > -1 ? "&" : "?") + "hat=" + Date.now() + "_" + n, { cache: "no-store", mode: "no-cors" })
+        .then(function (r) { return r.arrayBuffer(); })
+        .then(next, next);
+    })();
+  }
+})();
+</script>
