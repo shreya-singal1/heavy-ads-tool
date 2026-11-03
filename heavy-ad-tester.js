@@ -51,7 +51,7 @@
     '#verdict.info{display:block;background:#fff3cd;border:1px solid #e6c866}',
     '#log{margin-top:6px;font:11px/1.3 ui-monospace,Consolas,monospace;max-height:170px;overflow:auto;border-top:1px solid #ddd;padding-top:4px}',
     '#log div{word-break:break-all}',
-    '#log .BEACON{color:#0a7a0a;font-weight:700}#log .diag{color:#555}#log .PASS{color:#0a7a0a;font-weight:700}',
+    '#log .REPORT{color:#1a4fa0;font-weight:700}#log .BEACON{color:#0a7a0a;font-weight:700}#log .diag{color:#555}#log .PASS{color:#0a7a0a;font-weight:700}',
     '#log .FAIL{color:#b00020;font-weight:700}#log .INFO{color:#8a6d00;font-weight:700}#log .ACTION{color:#1a4fa0;font-weight:700}',
     '</style>',
     '<div class="p">',
@@ -209,6 +209,10 @@
       'document.addEventListener("securitypolicyviolation", function (e) { try { L("diag", "CSP violation: " + e.violatedDirective); } catch (x) {} });',
       'try { new ReportingObserver(function (r) { r.forEach(function (x) { try { L("diag", "observer callback got " + (x.body && x.body.id)); } catch (e) {} }); }, { types: ["intervention"], buffered: true }).observe(); } catch (e) {}',
       'window.addEventListener("pagehide", function () { try { L("diag", "pagehide fired in ad frame"); } catch (x) {} });',
+      '// ---- show the exact reports the sample script receives (does not change what it gets) ----',
+      'var RO = window.ReportingObserver;',
+      'function rep(rs, path) { try { for (var i = 0; i < rs.length; i++) { var r = rs[i], j = null; try { j = r.toJSON ? r.toJSON() : null; } catch (e) { j = null; } if (!j) { var b = r.body || {}; j = { type: r.type, url: r.url, body: { id: b.id, message: b.message, sourceFile: b.sourceFile, lineNumber: b.lineNumber, columnNumber: b.columnNumber } }; } L("REPORT", "via " + path + ": " + JSON.stringify(j)); } } catch (e) {} }',
+      'if (RO) { var W = function (cb, opts) { var o = new RO(function (rs, obs) { rep(rs, "observer callback"); return cb.call(this, rs, obs); }, opts); var tr = o.takeRecords; o.takeRecords = function () { var r = tr.call(o); rep(r, "pagehide takeRecords()"); return r; }; return o; }; W.prototype = RO.prototype; window.ReportingObserver = W; }',
       '// ---- sample script under test ----',
       o.addSample === false ? '' : sample,
       '// ---- load generator ----',
@@ -262,7 +266,9 @@
     var hatBeacon = function (u, ok) {
       S.beacons.push({ t: now(), url: u, queued: ok });
       S.lastBeaconAt = now();
-      log('BEACON', 'sendBeacon called' + (o.real ? '' : ' (captured, not sent)') + ', queued=' + ok + ' url=' + short(u));
+      log('BEACON', 'sendBeacon called' + (o.real ? ' (REAL send)' : ' (captured, not sent)') + ', queued=' + ok + ' | exact URL: ' + u);
+      var at = String(u).indexOf('&rd=');
+      if (at > -1) { try { log('BEACON', 'rd decoded: ' + decodeURIComponent(String(u).slice(at + 4))); } catch (e) {} }
     };
     w.__hatLog = hatLog;
     w.__hatBeacon = hatBeacon;

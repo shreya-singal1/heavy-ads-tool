@@ -7,12 +7,16 @@
 (function (w) {
   'use strict';
   var HAT = (w.HAT = {});
-  var S = (HAT.state = { startedAt: 0, finished: false, beacons: [], cb: false, hide: false, hideAt: 0, real: false, label: '', timeoutMs: 150000 });
+  var S = (HAT.state = {
+    startedAt: 0, finished: false, beacons: [], cb: false, hide: false, hideAt: 0, real: false, label: '', timeoutMs: 150000,
+    reports: [], beaconInfo: []
+  });
   var rows = [];
   var known = [];
 
   function $(id) { return document.getElementById(id); }
   function pad(n, len) { return String(n).padStart(len, '0'); }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
   HAT.$ = $;
 
   // ---------------------------------------------------------------- snippets that run inside creative frames
@@ -61,12 +65,21 @@
   // Load generator: keeps the main thread about 94% busy.
   HAT.BURN = '(function burn(){var s=performance.now();while(performance.now()-s<80){Math.sqrt(Math.random());}setTimeout(burn,5);})();';
 
-  // Reporter: replaces sendBeacon with a wrapper (records every call; sends only in real mode) and posts events to the page.
+  // Reporter (runs first inside the creative frame):
+  //  - replaces sendBeacon with a wrapper that records the exact URL of every call (sends it only in real mode),
+  //  - wraps ReportingObserver so the EXACT report objects the sample script receives (on the callback path and
+  //    on the pagehide takeRecords() path) are posted to the page, without changing what the script gets,
+  //  - posts diagnostics (callback ran, pagehide fired) to the page.
   HAT.reporter = function (real) {
-    return '(function(){var T=window.top;function post(kind,msg){try{T.postMessage({hat:1,kind:kind,msg:String(msg)},"*");}catch(e){}}' +
+    return '(function(){var T=window.top;function post(kind,msg,extra){try{T.postMessage({hat:1,kind:kind,msg:String(msg),extra:extra||null},"*");}catch(e){}}' +
+      'var RO=window.ReportingObserver;' +
+      'function rep(rs,path){try{for(var i=0;i<rs.length;i++){var r=rs[i],j=null;try{j=r.toJSON?r.toJSON():null;}catch(e){j=null;}' +
+      'if(!j){var b=r.body||{};j={type:r.type,url:r.url,body:{id:b.id,message:b.message,sourceFile:b.sourceFile,lineNumber:b.lineNumber,columnNumber:b.columnNumber}};}' +
+      'post("report","report seen by the script via "+path,{path:path,report:j});}}catch(e){}}' +
       'var real=' + (real ? 'true' : 'false') + ';var origSB=navigator.sendBeacon.bind(navigator);' +
-      'navigator.sendBeacon=function(u,d){var ok=true;if(real){ok=false;try{ok=origSB(u,d);}catch(e){}}post("beacon",(real?"REAL":"captured, not sent")+" queued="+ok+" url="+String(u).slice(0,90));return ok;};' +
-      'try{new ReportingObserver(function(rs){rs.forEach(function(r){post("diag","observer callback got "+(r.body&&r.body.id));});},{types:["intervention"],buffered:true}).observe();}catch(e){post("diag","no ReportingObserver");}' +
+      'navigator.sendBeacon=function(u,d){var ok=true;if(real){ok=false;try{ok=origSB(u,d);}catch(e){}}post("beacon",(real?"REAL":"captured, not sent")+" queued="+ok,{url:String(u),queued:ok,real:real});return ok;};' +
+      'try{new RO(function(rs){rs.forEach(function(r){post("diag","observer callback got "+(r.body&&r.body.id));});},{types:["intervention"],buffered:true}).observe();}catch(e){post("diag","no ReportingObserver");}' +
+      'if(RO){var W=function(cb,opts){var o=new RO(function(rs,obs){rep(rs,"observer callback");return cb.call(this,rs,obs);},opts);var tr=o.takeRecords;o.takeRecords=function(){var r=tr.call(o);rep(r,"pagehide takeRecords()");return r;};return o;};W.prototype=RO.prototype;window.ReportingObserver=W;}' +
       'window.addEventListener("pagehide",function(){post("diag","pagehide fired in the creative frame");});' +
       'post("diag","reporter armed | document origin: "+window.origin+" | storage: "+(function(){try{localStorage.length;return "allowed";}catch(e){return "BLOCKED";}})());})();';
   };
@@ -93,17 +106,50 @@
     rows.forEach(function (r) {
       var d = new Date(r.t);
       h += '<tr class="' + r.kind + '"><td>' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) + '.' + pad(d.getMilliseconds(), 3) +
-        '</td><td>' + r.kind + '</td><td>' + String(r.msg).replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</td></tr>';
+        '</td><td>' + r.kind + '</td><td>' + esc(r.msg) + '</td></tr>';
     });
     $('log').innerHTML = h;
   }
   HAT.add = function (kind, msg, t) { rows.push({ t: t || Date.now(), kind: kind, msg: msg }); render(); };
   HAT.verdict = function (kind, text) { var v = $('verdict'); v.className = kind; v.textContent = text; HAT.add(kind.toUpperCase(), text); };
 
+  // Show exactly what Chrome returned and exactly what the script sent.
+  function pretty(o) { try { return JSON.stringify(o, null, 2); } catch (e) { return String(o); } }
+  HAT.renderResult = function () {
+    var el = $('result');
+    if (!el) { return; }
+    var h = '';
+    S.reports.forEach(function (x, i) {
+      h += '<h3>1. The report Chrome handed to the script' + (S.reports.length > 1 ? ' (#' + (i + 1) + ')' : '') + '</h3>' +
+        '<div class="hint">Delivered via: <b>' + esc(x.path) + '</b>. This is the exact report object, as JSON.</div>' +
+        '<pre>' + esc(pretty(x.report)) + '</pre>';
+    });
+    S.beaconInfo.forEach(function (b, i) {
+      var url = b.url, at = url.indexOf('&rd='), base = at > -1 ? url.slice(0, at) : url, rdText = '', rdJson = null;
+      if (at > -1) { try { rdText = decodeURIComponent(url.slice(at + 4)); rdJson = JSON.parse(rdText); } catch (e) { rdJson = null; } }
+      h += '<h3>2. The beacon the script built' + (S.beaconInfo.length > 1 ? ' (#' + (i + 1) + ')' : '') + '</h3>' +
+        '<div class="hint">' + (b.real ? '<b>REAL send</b>: this request was sent.' : '<b>Captured only</b>: nothing was sent.') + ' <code>sendBeacon</code> returned ' + esc(b.queued) + '.</div>' +
+        '<div class="hint">Exact URL (POST, no body):</div><pre>' + esc(url) + '</pre>' +
+        '<div class="hint">Pixel part (your <code>PIXEL</code> value):</div><pre>' + esc(base) + '</pre>' +
+        '<div class="hint">The <code>rd</code> parameter, decoded:</div><pre>' + esc(rdJson ? pretty(rdJson) : (rdText || '(none)')) + '</pre>';
+    });
+    if (S.reports.length || S.beaconInfo.length) {
+      h += '<div class="hint" style="margin-top:8px"><b>How to read it.</b> <code>type</code> is always <code>intervention</code> and <code>body.id</code> is ' +
+        '<code>HeavyAdIntervention</code> for this case. <code>message</code> is Chrome\'s reason. <code>sourceFile</code>, <code>lineNumber</code> and ' +
+        '<code>columnNumber</code> are normally <code>null</code> for heavy ads (Chrome gives no code location). The script copies only ' +
+        '<code>message</code>, <code>sourceFile</code>, <code>lineNumber</code> and <code>columnNumber</code> into <code>rd</code>; ' +
+        '<code>type</code>, <code>url</code> and <code>id</code> are not sent.</div>';
+      if (S.reports.length && !S.beaconInfo.length) { h += '<div class="hint" style="color:#b00020"><b>A report arrived but no beacon has been built yet.</b></div>'; }
+    }
+    el.innerHTML = h;
+  };
+
   // Call when a test starts. label names the creative type, shown in the verdict.
   HAT.begin = function (label, real) {
     S.startedAt = Date.now(); S.finished = false; S.beacons = []; S.cb = false; S.hide = false; S.hideAt = 0; S.real = !!real; S.label = label;
+    S.reports = []; S.beaconInfo = [];
     $('verdict').className = '';
+    if ($('result')) { $('result').innerHTML = ''; }
     return S.startedAt;
   };
 
@@ -124,8 +170,6 @@
     list.forEach(function (f) {
       if (known.indexOf(f) < 0) {
         known.push(f);
-        var o = '?';
-        try { o = new URL(f.src, location.href).origin; } catch (e) {}
         var name = f.id || f.name || '(no id)';
         HAT.add('ad', 'iframe appeared: ' + name + ' | ' + (HAT.accessible(f) ? 'same-origin (reachable)' : 'cross-origin') + ' | sandbox=' + (f.getAttribute('sandbox') === null ? 'none' : 'yes'));
         f.addEventListener('load', function () { HAT.add('ad', 'iframe fired load: ' + name); });
@@ -163,8 +207,14 @@
     w.addEventListener('message', function (e) {
       var d = e.data;
       if (!d || !d.hat) { return; }
-      HAT.add(d.kind === 'beacon' ? 'BEACON' : 'diag', '[creative frame] ' + d.msg);
-      if (d.kind === 'beacon') { S.beacons.push(Date.now()); }
+      if (d.kind === 'report') {
+        S.reports.push(d.extra);
+        HAT.add('REPORT', JSON.stringify(d.extra.report) + '   (via ' + d.extra.path + ')');
+        HAT.renderResult();
+        return;
+      }
+      HAT.add(d.kind === 'beacon' ? 'BEACON' : 'diag', '[creative frame] ' + d.msg + (d.kind === 'beacon' && d.extra ? ' url=' + d.extra.url : ''));
+      if (d.kind === 'beacon') { S.beacons.push(Date.now()); if (d.extra) { S.beaconInfo.push(d.extra); } HAT.renderResult(); }
       if (/observer callback got HeavyAdIntervention/.test(d.msg)) { S.cb = true; }
       if (/^pagehide/.test(d.msg)) { S.hide = true; S.hideAt = Date.now(); }
     });

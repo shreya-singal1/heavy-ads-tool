@@ -37,6 +37,16 @@ All results above are from desktop Chrome against Google's public test ad and th
 The verdict names the creative type that was tested and which path sent the beacon: the observer callback, or the `pagehide` drain (`takeRecords()`),
 which catches a report that arrives too late for the callback.
 
+### What the pages show you
+Under the verdict, the banner and VPAID pages show exactly what happened, untruncated:
+1. **The report Chrome handed to the script**: the exact report object as JSON (`type`, `url`, and `body` with `id`, `message`, `sourceFile`,
+   `lineNumber`, `columnNumber`), and whether it came through the observer callback or through the `pagehide` `takeRecords()` drain.
+2. **The beacon the script built**: the exact URL, the pixel part, and the `rd` parameter decoded. The script copies only `message`, `sourceFile`,
+   `lineNumber` and `columnNumber` into `rd`; `type`, `url` and `id` are not sent.
+
+The DevTools panel logs the same two things (`REPORT` and `BEACON` lines). The tool observes the reports by wrapping `ReportingObserver` inside the
+creative frame; the script still receives the same reports in the same way.
+
 ### About beacons
 - **Capture only** (the default): the script's `sendBeacon` is replaced by a recorder, so nothing leaves your browser. The page shows the exact URL it would have sent.
 - **Send a real beacon**: sends exactly one request to the pixel URL you set (you are asked to confirm). To see it, open DevTools > Network, tick
